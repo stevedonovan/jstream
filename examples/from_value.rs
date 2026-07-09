@@ -1,7 +1,7 @@
 use jstream::JsonStream;
 use serde_json::json;
 
-fn main() -> serde_json::Result<()> {
+fn main() -> jstream::Result<()> {
     let value = json!({
         "name": "Grace Hopper",
         "role": "computer scientist",

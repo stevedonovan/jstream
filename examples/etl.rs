@@ -1,7 +1,7 @@
 use jstream::{JsonGet, JsonStream, format_value};
 use serde_json::{Value, json};
 
-fn main() -> serde_json::Result<()> {
+fn main() -> jstream::Result<()> {
     let text = r#"{
         "first_name": "Ada",
         "last_name": "Lovelace",
@@ -16,17 +16,19 @@ fn main() -> serde_json::Result<()> {
             "age": 0
         }))
         .select(["first_name", "last_name", "age", "source"])
+        .copy("source", "/metadata/source")
         .merge(json!({
             "source": "imported",
             "site": "corporate"
         }))
-        .eval(|value| {
+        .merge_eval(|value| {
             json!({
                 "display_name": format_value(value, "{first_name} {last_name}"),
                 "slug": format_value(value, "{first_name}-{last_name}").to_lowercase(),
                 "adult": value.get_i64("age", 0) >= 18
             })
-        })?;
+        })?
+        .rename("source", "original_source")?;
 
     println!("{}", serde_json::to_string_pretty(&value)?);
 

@@ -1,7 +1,7 @@
 use jstream::JsonStream;
 use serde_json::Value;
 
-fn main() -> serde_json::Result<()> {
+fn main() -> jstream::Result<()> {
     let text = r#"{
         "name": "Ada Lovelace",
         "date": "1843-09-01",

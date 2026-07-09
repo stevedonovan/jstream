@@ -1,43 +1,158 @@
 # jstream
 
-`jstream` is a fluent API for chaining operations on JSON data.
+`jstream` is a small fluent-style API for transforming `serde_json::Value`.
 
-```Rust
-use jstream::{JsonGet, JsonStream, format_value};
-use serde_json::{Value, json};
+It handles common JSON object shaping, validation, field access,
+formatting, and simple text parsing. For domain-specific work such as dates, regex parsing, or
+normalization rules, use `try_map` to drop in ordinary Rust functions and your preferred libraries.
 
-let value = serde_json::from_str::<Value>(text)
-    .require_shape(json!({
-        "name": "",
-        "age": 0,
-        "metadata": {
-            "department": ""
-        }
-    }))
-    .select(["name", "date", "age"])  // null if a requested field is not present
-    .merge(json!({ "site": "corporate", "age": 0 }))
-    .eval(|value| {
-        json!({
-            "display_name": format_value(value, "{name} ({/metadata/department})"),
-            "slug": format_value(value, "{name}").to_lowercase(),
-            "adult": value.get_i64("age", 0) >= 18
+```rust
+use jstream::{JsonGet, JsonStream, format_value, Value, json};
+
+fn main() -> jstream::Result<()> {
+    let text = r#"{
+        "raw": "Ada Lovelace (research)",
+        "date": "1843-09-01",
+        "age": 27,
+        "internal_id": "hidden"
+    }"#;
+
+    let value = serde_json::from_str::<Value>(text)
+        .parse_text("raw", "{name} ({/metadata/department})")
+        .require_shape(json!({
+            "name": "",
+            "age": 0,
+            "metadata": {
+                "department": ""
+            }
+        }))
+        .select(["name", "date", "age", "metadata", "raw"])
+        .merge(json!({ "site": "corporate", "age": 0 }))
+        .merge_eval(|value| {
+            json!({
+                "display_name": format_value(value, "{name} ({/metadata/department})"),
+                "slug": format_value(value, "{name}").to_lowercase(),
+                "adult": value.get_i64("age", 0) >= 18
+            })
         })
-    })
-    .add("site", "corporate")?;
+        .copy("name", "display_name")
+        .rename("name", "/person/name")
+        .delete("date")
+        .delete("raw")
+        .add("site", "corporate")?;
+
+    assert_eq!(
+        value,
+        json!({
+            "adult": true,
+            "age": 27,
+            "display_name": "Ada Lovelace",
+            "metadata": {
+                "department": "research"
+            },
+            "person": {
+                "name": "Ada Lovelace"
+            },
+            "site": "corporate",
+            "slug": "ada lovelace"
+        })
+    );
+
+    Ok(())
+}
 ```
 
-This crate defines a trait over `serde_json::Value` which implements common operations like `select`
-and `add`. The same trait is also implemented for `serde_json::Result<Value>`, so parse errors and
-serialization errors can flow through the chain and be handled with one final `?`.
+## JsonStream API
 
-`merge` performs a shallow object merge without overriding existing fields. `eval` receives the
-current pipeline value, returns a JSON object, and merges it with the same non-overriding behavior.
-`format_value` expands top-level `{field}` placeholders from the current value; unknown fields expand
-to empty strings. Placeholders that start with `/`, such as `{/metadata/department}`, are resolved as
-JSON Pointers.
-`JsonGet` provides typed accessors such as `get_str`, `get_i64`, `get_f64`, `get_bool`,
-`get_array`, and `get_object`, using the same top-level-or-JSON-Pointer lookup rules.
-`require_shape` checks that required fields and JSON types are present before transformation; extra
-input fields are allowed.
+`JsonStream` is implemented for `serde_json::Value`, `jstream::Result<Value>`, and
+`serde_json::Result<Value>`, so parse errors and transform errors can flow through a chain and be
+handled with one final `?`.
 
-	   
+- `select(["a", "b"])`: keep requested top-level fields, inserting `null` for missing fields.
+- `add("field", value)`: add or replace a top-level field with any serializable value.
+- `merge(json!({...}))`: shallow merge object fields without replacing existing fields.
+- `merge_eval(|value| json!({...}))`: calculate fields from the current value, then merge them.
+- `parse_text("field", "{name} <{email}>")`: parse a string field and merge extracted fields.
+- `delete("field")` / `delete("/path/to/field")`: remove a top-level field or JSON Pointer path.
+- `rename(from, to)` and `copy(from, to)`: move or duplicate top-level fields or JSON Pointer paths.
+- `require_shape(json!({...}))`: require fields and JSON types described by an example shape.
+- `select_shape(json!({...}))`: validate a shape, then keep only fields described by that shape.
+- `validate_as::<T>()`: validate by attempting to deserialize into a Rust type; the value is passed through.
+- `try_map(function)`: apply a fallible operation to the data.
+
+Note that `merge*` will silently not merge anything which is not an object. 
+
+This gives us a way to conditionally add fields:
+
+```rust
+	json!({"num": 1})
+	.merge_eval(|j|) {
+		if j.get_bool("num",0) > 0 {
+			json!({"is-non-zero": true}) 
+		} else {
+			Value::Null
+		}
+	}
+```
+
+## Text Helpers
+
+`format_value(value, template)` expands `{field}` placeholders from a JSON value. Placeholders that
+start with `/`, such as `{/metadata/department}`, are resolved as JSON Pointers.
+
+`parse_string(text, template)` uses the same placeholder notation to extract string fields from text
+into a JSON object. Note that the last placeholder picks up the _rest of the text_, for instance
+`parse_string("one,2 two three","{name},{value} {rest}") => {"name":"one","rest":"two three","value":"2"}`
+(This was inspired by the `parse` command in `Nushell`)
+
+## Typed Access
+
+`JsonGet` provides typed accessors with explicit defaults:
+
+```rust
+use jstream::JsonGet;
+
+let name = value.get_str("name", "unknown");
+let age = value.get_i64("age", 0);
+let active = value.get_bool("/metadata/active", false);
+let metadata = value.get_object_opt("metadata");
+```
+
+The same top-level-or-JSON-Pointer lookup rules apply to `get_f64`,
+`get_array`, `get_object`, `get_array_opt`, and `get_object_opt`.
+
+## Sub-Pipelines
+
+Use `try_map` to create a processing pipeline with composition:
+
+```rust
+use jstream::{JsonGet, JsonStream, Result};
+use serde_json::{Value, json};
+
+fn normalize_person(value: Value) -> Result<Value> {
+    value
+        .require_shape(json!({ "name": "", "age": 0 }))
+        .select(["name", "age"])
+        .merge_eval(|value| {
+            json!({
+                "adult": value.get_i64("age", 0) >= 18
+            })
+        })
+}
+
+fn main() -> Result<()> {
+    let value = serde_json::from_str::<Value>(r#"{"name":"Ada","age":27}"#)
+        .try_map(normalize_person)?;
+
+    assert_eq!(
+        value,
+        json!({
+            "adult": true,
+            "age": 27,
+            "name": "Ada"
+        })
+    );
+
+    Ok(())
+}
+```
