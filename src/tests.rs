@@ -129,6 +129,67 @@ fn merge_eval_calculates_and_merges_fields_without_overriding_existing_fields() 
 }
 
 #[test]
+fn replace_eval_calculates_and_replaces_existing_fields() {
+    let value = json!({
+        "first_name": "Ada",
+        "last_name": "Lovelace",
+        "display_name": "existing"
+    })
+    .replace_eval(|value| {
+        json!({
+            "display_name": format_value(value, "{first_name} {last_name}"),
+            "slug": format_value(value, "{first_name}-{last_name}").to_lowercase()
+        })
+    })
+    .unwrap();
+
+    assert_eq!(
+        value,
+        json!({
+            "first_name": "Ada",
+            "last_name": "Lovelace",
+            "display_name": "Ada Lovelace",
+            "slug": "ada-lovelace"
+        })
+    );
+}
+
+#[test]
+fn replace_eval_ignores_non_object_fields() {
+    let value = json!({ "name": "Ada" })
+        .replace_eval(|_| Value::Null)
+        .unwrap();
+
+    assert_eq!(value, json!({ "name": "Ada" }));
+}
+
+#[test]
+fn replace_eval_converts_parsed_date_fields() {
+    let value = json!({ "date": "2025-05-20" })
+        .parse_text("date", "{year}-{month}-{day}")
+        .replace_eval(|value| {
+            let part = |field| value.get_str(field, "0").parse::<i64>().unwrap_or_default();
+
+            json!({
+                "year": part("year"),
+                "month": part("month"),
+                "day": part("day")
+            })
+        })
+        .unwrap();
+
+    assert_eq!(
+        value,
+        json!({
+            "date": "2025-05-20",
+            "year": 2025,
+            "month": 5,
+            "day": 20
+        })
+    );
+}
+
+#[test]
 fn parse_text_parses_string_fields_and_merges_without_overriding_existing_fields() {
     let value = json!({
         "raw": "Ada Lovelace (research)",

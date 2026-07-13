@@ -72,6 +72,7 @@ handled with one final `?`.
 - `add("field", value)`: add or replace a top-level field with any serializable value.
 - `merge(json!({...}))`: shallow merge object fields without replacing existing fields.
 - `merge_eval(|value| json!({...}))`: calculate fields from the current value, then merge them.
+- `replace_eval(|value| json!({...}))`: calculate fields from the current value, then merge them with replacement.
 - `parse_text("field", "{name} <{email}>")`: parse a string field and merge extracted fields.
 - `delete("field")` / `delete("/path/to/field")`: remove a top-level field or JSON Pointer path.
 - `rename(from, to)` and `copy(from, to)`: move or duplicate top-level fields or JSON Pointer paths.
@@ -80,19 +81,55 @@ handled with one final `?`.
 - `validate_as::<T>()`: validate by attempting to deserialize into a Rust type; the value is passed through.
 - `try_map(function)`: apply a fallible operation to the data.
 
-Note that `merge*` will silently not merge anything which is not an object. 
+Note that `merge`, `merge_eval`, and `replace_eval` silently skip calculated values that are not
+objects.
 
 This gives us a way to conditionally add fields:
 
 ```rust
-	json!({"num": 1})
-	.merge_eval(|j|) {
-		if j.get_bool("num",0) > 0 {
-			json!({"is-non-zero": true}) 
-		} else {
-			Value::Null
-		}
-	}
+use jstream::{JsonGet, JsonStream, Value, json};
+
+let value = json!({"num": 1})
+    .merge_eval(|value| {
+        if value.get_i64("num", 0) > 0 {
+            json!({"is_non_zero": true})
+        } else {
+            Value::Null
+        }
+    })?;
+
+assert_eq!(value, json!({"num": 1, "is_non_zero": true}));
+# Ok::<(), jstream::Error>(())
+```
+
+Use `replace_eval` when calculated fields should overwrite existing values. This is useful after
+parsing text into string fields and then converting those strings:
+
+```rust
+use jstream::{JsonGet, JsonStream, json};
+
+let value = json!({ "date": "2025-05-20" })
+    .parse_text("date", "{year}-{month}-{day}")
+    .replace_eval(|value| {
+        let part = |field| value.get_str(field, "0").parse::<i64>().unwrap_or_default();
+
+        json!({
+            "year": part("year"),
+            "month": part("month"),
+            "day": part("day")
+        })
+    })?;
+
+assert_eq!(
+    value,
+    json!({
+        "date": "2025-05-20",
+        "year": 2025,
+        "month": 5,
+        "day": 20
+    })
+);
+# Ok::<(), jstream::Error>(())
 ```
 
 ## Text Helpers

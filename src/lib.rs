@@ -73,6 +73,10 @@
 //! Collection accessors also have option-returning forms:
 //! [`JsonGet::get_array_opt`] and [`JsonGet::get_object_opt`].
 //!
+//! Use [`JsonStream::replace_eval`] when calculated fields should overwrite
+//! existing fields, for example after parsing text fields that need numeric
+//! conversion.
+//!
 use std::{error, fmt};
 
 use serde::{Serialize, de::DeserializeOwned};
@@ -378,6 +382,7 @@ impl JsonGet for Value {
 ///     .select(["name", "date", "age"])
 ///     .merge(serde_json::json!({ "site": "corporate", "age": 38 }))
 ///     .merge_eval(|value| serde_json::json!({ "slug": value.get_str("name", "").to_lowercase() }))
+///     .replace_eval(|value| serde_json::json!({ "age": value.get_i64("age", 0) }))
 ///     .delete("date")
 ///     .add("site", "corporate")?;
 /// # Ok(value)
@@ -412,6 +417,12 @@ pub trait JsonStream {
     /// Calculate fields from the current value and merge them without replacing
     /// existing fields.
     fn merge_eval<F>(self, f: F) -> Result<Value>
+    where
+        F: FnOnce(&Value) -> Value;
+
+    /// Calculate fields from the current value and merge them, replacing
+    /// existing fields.
+    fn replace_eval<F>(self, f: F) -> Result<Value>
     where
         F: FnOnce(&Value) -> Value;
 
@@ -528,6 +539,14 @@ impl JsonStream for Value {
         merge_values(self, fields)
     }
 
+    fn replace_eval<F>(self, f: F) -> Result<Value>
+    where
+        F: FnOnce(&Value) -> Value,
+    {
+        let fields = f(&self);
+        replace_values(self, fields)
+    }
+
     fn parse_text<K>(self, key: K, template: &str) -> Result<Value>
     where
         K: AsRef<str>,
@@ -622,6 +641,13 @@ impl JsonStream for Result<Value> {
         F: FnOnce(&Value) -> Value,
     {
         self.and_then(|json| json.merge_eval(f))
+    }
+
+    fn replace_eval<F>(self, f: F) -> Result<Value>
+    where
+        F: FnOnce(&Value) -> Value,
+    {
+        self.and_then(|json| json.replace_eval(f))
     }
 
     fn parse_text<K>(self, key: K, template: &str) -> Result<Value>
@@ -726,6 +752,16 @@ impl JsonStream for serde_json::Result<Value> {
         }
     }
 
+    fn replace_eval<F>(self, f: F) -> Result<Value>
+    where
+        F: FnOnce(&Value) -> Value,
+    {
+        match self {
+            Ok(json) => json.replace_eval(f),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     fn parse_text<K>(self, key: K, template: &str) -> Result<Value>
     where
         K: AsRef<str>,
@@ -818,6 +854,21 @@ fn merge_values(base: Value, fields: Value) -> Result<Value> {
     if let Value::Object(fields) = fields {
         for (key, value) in fields {
             object.entry(key).or_insert(value);
+        }
+    }
+
+    Ok(Value::Object(object))
+}
+
+fn replace_values(base: Value, fields: Value) -> Result<Value> {
+    let mut object = match base {
+        Value::Object(object) => object,
+        _ => Map::new(),
+    };
+
+    if let Value::Object(fields) = fields {
+        for (key, value) in fields {
+            object.insert(key, value);
         }
     }
 
