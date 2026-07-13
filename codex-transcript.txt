@@ -1,0 +1,1082 @@
+╭───────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.141.0)            │
+│                                       │
+│ model:     gpt-5.5   /model to change │
+│ directory: ~/rust/jstream             │
+╰───────────────────────────────────────╯
+
+
+› So the task is to implement `jstream`, the initial implementation is described in `readme.md`. It will be a library
+  crate with an examples folder with some representative examples of use. First look at the problem, come back with
+  your understanding of it, and come back with any clarifications you need before proceding.
+
+
+• I’ll inspect the repo and README first, then I’ll summarize the intended API/behavior and call out any decisions that
+  need your input before I implement.
+
+• My understanding:
+
+  jstream should be a Rust library crate that adds a fluent extension trait for serde_json::Value, so callers can chain
+  JSON transformations directly on values.
+
+  From the README example, the core shape is likely:
+
+  use serde_json::Value;
+  use jstream::JsonStreamExt;
+
+  let value = serde_json::from_str::<Value>(text)?
+      .select(&["name", "date", "age"])
+      .add("site", "corporate");
+
+  Expected initial behavior:
+
+  - select(&["name", "date", "age"])
+      - Works on a JSON object.
+      - Returns a JSON object containing only those keys.
+      - For requested keys that are absent, inserts Value::Null.
+      - Likely preserves requested field order as much as serde_json::Map allows.
+
+  - add("site", "corporate")
+      - Works on a JSON object.
+      - Adds or overwrites the field site.
+      - Accepts values convertible to JSON, probably via serde::Serialize.
+
+  - Implemented as a trait over serde_json::Value.
+  - Crate should include representative examples under examples/.
+
+  Clarifications before I proceed:
+
+  1. Should these methods consume Value and return Value for fluent chaining, or mutate by &mut self? The README
+  suggests consuming/returning Value.
+  2. For non-object inputs, should operations:
+      - return the original value unchanged,
+      - convert to an object,
+      - or return a Result with an error?
+
+     The README example does not use Result, so I’d default to unchanged for non-objects or object-producing behavior
+     for select.
+
+  3. Should add accept any serializable value, e.g. add("age", 42), add("active", true), add("meta", json!({...})), or
+  only serde_json::Value/strings initially? I’d prefer impl Serialize.
+  4. Should missing selected fields always be null, including when selecting from a non-object? For example, should
+  json!(42).select(&["a"]) become {"a": null}?
+
+  My recommended defaults are: consuming fluent API, add accepts impl Serialize, select always returns an object with
+  the requested keys, and add turns non-object inputs into an object containing only the added key.
+
+
+› (1) these methods pass by value, yes. (2) The initial result from `from_str` should be handled. Not sure yet how we
+  handle errors without putting question mark operators after *everything* (3) I like this idea, anything serializable
+  (4) for now I agree. So please proceed!
+
+
+• I’ll scaffold this as a library crate, then add the extension trait and examples. For error handling, I’ll keep the
+  transform methods infallible and add trait support for Result<Value, serde_json::Error> so the parse result can flow
+  into the same chain without ? after every transformation.
+
+• The repo is essentially empty apart from readme.md, so I’m going to create the Cargo library structure directly and
+  keep the README as the design note/user-facing intro.
+
+• Cargo has created the crate skeleton. I’m reading the generated files before patching so the implementation matches
+  the default layout cleanly.
+
+• There’s one design pressure worth resolving in code: serde_json::to_value can fail for some Serialize inputs, so add
+  cannot be honestly infallible if it accepts arbitrary serializable values. I’m going to make stream operations return
+  serde_json::Result<Value> and implement the same trait for both Value and serde_json::Result<Value>, which lets
+  callers chain everything and place ? only at the end.
+
+• I’m applying the first implementation now: dependencies, the public trait, tests for the agreed edge cases, and
+  examples showing both parsed input and existing Value input.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The implementation is in place. I’m going to format and run the test suite/examples now; dependency download may
+  require approval if the sandbox cannot reach crates.io.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Tests and the doc example pass after allowing Cargo to fetch dependencies. I’m doing one more pass over the examples
+  specifically and then I’ll summarize the files changed and the parse-error chaining behavior.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The examples compile. I’m going to update the README so it reflects the actual Result-returning chain with one
+  final ?, instead of leaving the original sketch inconsistent with the implementation.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Implemented the initial jstream library crate.
+
+  Key pieces:
+
+  - Added JsonStream extension trait in src/lib.rs:21.
+  - Implemented select and add for both serde_json::Value and serde_json::Result<Value>.
+  - select returns an object with requested fields, using null for missing fields and treating non-objects as empty
+  objects.
+  - add accepts any Serialize value and treats non-objects as empty objects.
+  - Updated readme.md:1 to show the final ? chaining style.
+  - Added representative examples in examples/basic.rs:1 and examples/from_value.rs:1.
+
+  Verification:
+
+  - cargo test passes: 5 unit tests + 1 doctest.
+  - cargo test --examples passes.
+
+
+› Cool, this is a good first pass; I appreciate the trait being implemented for both Value and Result<Value>. For any
+  ETL pipeline, we will also need a way to merge and calculate fields. `merge` is passed an object (`json` macro is
+  useful for this) and merges with the pipeline data, but does not *override* fields. `eval` takes a closure which
+  returns a Value which then merged - e.g. equivalent of `add('a',1)` would be `eval(|v| json!({"a": 1})` except now we
+  can now calculate fields.
+
+
+• I’ll add merge and eval to the same fluent trait, preserving the existing Result<Value> chaining model. I’m going to
+  inspect the current files briefly, then patch the trait, implementations, tests, docs, and examples.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The behavior I’m encoding is shallow object merge with existing pipeline fields winning. If the merge/eval output is
+  not an object, it contributes no fields; if the pipeline value is not an object, it is treated as an empty object,
+  matching the existing select/add precedent.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The trait and unit coverage are patched. I’m formatting and running tests now; then I’ll update README/examples so the
+  public surface is documented with the ETL use case.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Core tests pass with the new operations. I’m adding a focused ETL example that calculates fields from existing data
+  and shows merge preserving original fields.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Docs and examples now reflect merge/eval. I’m running the full test set plus example compilation once more.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Because these files are still untracked in the fresh repo, git diff does not show the new-file content yet. I’m
+  checking the actual file contents and running the final tests directly.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Implemented merge and eval.
+
+  What changed:
+
+  - Added merge(value) to shallow-merge object fields without overriding existing pipeline fields.
+  - Added eval(|value| json!({...})) to calculate fields from the current value, then merge them with the same non-
+  overriding behavior.
+  - Implemented both methods for Value and serde_json::Result<Value>, preserving the “one final ?” chaining model.
+  - Added tests for merge precedence, non-object handling, calculated fields, and result chaining.
+  - Added examples/etl.rs:1 and updated README/basic example.
+
+  Verification:
+
+  - cargo test passes: 9 unit tests + 1 doctest.
+  - cargo test --examples passes.
+
+
+› I am looking at the etl.rs example, in particular the `eval` call. I think there's a more ergonomic pattern for this
+  common case of creating strings - the idea is to create a function `format_value` which would work like this
+  `format_value(&v,"{first_name} {second_name}")`. Unknown fields would be expanded as empty strings (as with shell
+  expansion).
+
+
+• I’ll add a small public helper for this rather than baking it into eval, then update the ETL example to show the
+  intended ergonomic pattern. I’ll include tests for missing fields expanding to empty strings and non-string JSON
+  values formatting sensibly.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• I’m going to keep the formatter deliberately simple: {field} looks up a top-level key, missing keys and null become
+  "", strings are inserted without quotes, and other JSON values use their compact JSON representation. Unmatched braces
+  will stay literal so partially typed templates do not silently drop text.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• format_value is now in the library and the eval tests use it. I’m updating the example and README next so the common
+  string-building case is the one users see first.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The public docs and ETL example now use format_value. I’m formatting and running the test suite, including doctests
+  and examples, to catch any import or documentation issues.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Formatting is clean. I noticed the import order was normalized by rustfmt; I’m running the full verification now.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Added format_value as a public helper in src/lib.rs:20.
+
+  Behavior:
+
+  - format_value(&v, "{first_name} {second_name}")
+  - Unknown fields expand to "".
+  - null expands to "".
+  - Strings expand without quotes.
+  - Numbers/bools/arrays/objects expand as compact JSON.
+  - Unmatched { stays literal.
+
+  Updated examples/etl.rs:1 to use it inside eval, and updated the README example.
+
+  Verification:
+
+  - cargo test passes: 13 unit tests + 2 doctests.
+  - cargo test --examples passes.
+
+
+› There is a simple enhancement to `format_value`, which is: if the reference inside '{}' starts with '/', then it is
+  assumed to be JSON Pointer - and then you can use the `pointer` method of `Value`.
+
+
+• I’ll extend format_value so {name} remains the current top-level lookup, while {/path/to/value} uses Value::pointer.
+  I’ll add focused tests for nested lookups, missing pointers, null pointers, and escaped JSON Pointer tokens.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The implementation change is small and uses Value::pointer directly for placeholders beginning with /. I’m updating
+  the README example to show a nested JSON Pointer reference, then I’ll format and run tests.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Docs are updated. I’m running formatting and the test suite now to validate the new pointer cases and doctest.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Implemented the format_value JSON Pointer enhancement.
+
+  Now:
+
+  - {field} still resolves a top-level field.
+  - {/some/nested/path} resolves through Value::pointer.
+  - Missing pointers and null still expand to "".
+  - JSON Pointer escaping works, e.g. {/a~1b/c~0d}.
+
+  Updated docs in src/lib.rs:5 and readme.md:1.
+
+  Verification:
+
+  - cargo test passes: 16 unit tests + 2 doctests.
+  - cargo test --examples passes.
+
+
+› Another ergonomic improvement are trait methods which follow the pattern of getting the value of field and providing
+  an explicit default, e.g. `value.get_str("boo","unknown")`. Likewise `.get_i64`, `.get_f64`, `.get_bool`. Since they
+  don't return `Value` they should probably be another trait. There are also `.get_array` and `get_object`. Does this
+  feel like a useful addition?
+
+
+• Yes, that feels useful, especially for the eval closure use case.
+
+  I’d make it a separate trait, something like JsonGetExt or JsonValueExt, implemented for serde_json::Value:
+
+  use jstream::JsonGetExt;
+
+  let name = value.get_str("name", "unknown");
+  let age = value.get_i64("age", 0);
+  let active = value.get_bool("active", false);
+
+  Suggested behavior:
+
+  - Top-level key lookup only, matching current {field} behavior.
+  - Return the explicit default if:
+      - the current value is not an object,
+      - the field is missing,
+      - the field exists but has the wrong type,
+      - the field is null.
+
+  - get_str("boo", "unknown") should probably return &str, borrowing either the JSON string or the provided default.
+  - get_i64, get_f64, get_bool return copied scalar values.
+  - get_array and get_object are the only slightly tricky ones because defaults are awkward for borrowed collections.
+
+  For arrays/objects, I’d lean toward methods that return options instead of requiring a default:
+
+  value.get_array("items").unwrap_or(&[]);
+  value.get_object("meta")
+
+  But &[] and empty maps have lifetime/static issues unless we provide helpers/constants internally. So a pragmatic API
+  could be:
+
+  fn get_array(&self, key: &str) -> &[Value];
+  fn get_object(&self, key: &str) -> Option<&Map<String, Value>>;
+
+  Or, if you want the explicit-default pattern everywhere:
+
+  fn get_array<'a>(&'a self, key: &str, default: &'a [Value]) -> &'a [Value];
+  fn get_object<'a>(
+      &'a self,
+      key: &str,
+      default: &'a Map<String, Value>,
+  ) -> &'a Map<String, Value>;
+
+  My recommendation:
+
+  pub trait JsonGet {
+      fn get_str<'a>(&'a self, key: &str, default: &'a str) -> &'a str;
+      fn get_i64(&self, key: &str, default: i64) -> i64;
+      fn get_f64(&self, key: &str, default: f64) -> f64;
+      fn get_bool(&self, key: &str, default: bool) -> bool;
+      fn get_array<'a>(&'a self, key: &str, default: &'a [Value]) -> &'a [Value];
+      fn get_object<'a>(
+          &'a self,
+          key: &str,
+          default: &'a serde_json::Map<String, Value>,
+      ) -> &'a serde_json::Map<String, Value>;
+  }
+
+  I’d also consider making the key resolver shared with format_value, so get_str("/nested/path", "unknown") can support
+  JSON Pointer too. That would make the API more consistent and immediately useful for nested ETL records.
+
+
+› I like this proposal. A good idea to share the resolver with `format_value`
+
+
+• I’ll implement the separate getter trait and route both the getters and format_value through one resolver: keys
+  starting with / use JSON Pointer, otherwise they use top-level lookup. Then I’ll update the ETL example to use the
+  scalar getters where it improves readability.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The getter trait is in place and shares the same resolver as format_value. I’m going to format now because the object
+  getter signature is long, then I’ll update examples/docs around the new trait.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• I spotted one README inconsistency while reviewing: it imported json from jstream, but the crate does not re-export
+  serde_json::json. I’m correcting that and adding a small getter use in the ETL example so the new trait is visible in
+  representative usage.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The docs and ETL example now reference JsonGet correctly. I’m running formatting and verification; if the collection
+  getter assertions need lifetime cleanup, this will catch it.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Implemented the separate JsonGet trait and shared resolver.
+
+  Added:
+
+  - get_str(key, default)
+  - get_i64(key, default)
+  - get_f64(key, default)
+  - get_bool(key, default)
+  - get_array(key, default)
+  - get_object(key, default)
+
+  Lookup behavior is shared with format_value:
+
+  - "field" resolves a top-level field.
+  - "/nested/path" resolves as JSON Pointer.
+  - Missing, null, wrong-type, or non-object top-level lookups return the explicit default.
+
+  Also updated examples/etl.rs:1 to use JsonGet, and updated readme.md:1.
+
+  Verification:
+
+  - cargo test passes: 20 unit tests + 3 doctests.
+  - cargo test --examples passes.
+
+
+› I'm aware that we are swallowing potential errors. One approach would be to fail early with a data schema check. A
+  neat trick is to see if we can deserialize to a struct before applying any further transforms. Another way would be
+  to define the schema by example, and compare fields and types, insisting that at least a certain subset of fields are
+  present.
+
+
+• Yes, both approaches make sense, and they solve slightly different problems.
+
+  The deserialize to a struct approach is the strongest first layer:
+
+  #[derive(serde::Deserialize)]
+  struct Input {
+      name: String,
+      age: i64,
+      active: bool,
+  }
+
+  serde_json::from_value::<Input>(value.clone())?;
+
+  That gives precise Serde errors, supports nested data, optionals, renamed fields, custom deserializers, etc. The
+  drawback is that it is less ad hoc: callers need to define a struct.
+
+  The “schema by example” approach fits jstream well because it stays JSON-native:
+
+  value
+      .require(json!({
+          "name": "",
+          "age": 0,
+          "active": true
+      }))?
+      .select(["name", "age", "active"])
+
+  Possible semantics:
+
+  - Example object defines required fields and expected JSON types.
+  - Values in the example are ignored except for type.
+  - Missing required fields cause an error.
+  - Wrong types cause an error.
+  - Extra fields in the input are allowed.
+  - Nested example objects recurse.
+  - Arrays are trickier; initially we could only assert “is array”, not element schema.
+
+  For subset validation, maybe:
+
+  .require(json!({
+      "name": "",
+      "age": 0
+  }))
+
+  Or a more explicit name:
+
+  .validate_shape(json!({
+      "name": "",
+      "age": 0
+  }))
+
+  I’d probably add two things:
+
+  1. validate_as::<T>()
+
+     Consumes/returns the pipeline Value, but attempts deserialization first:
+
+     value
+         .validate_as::<Input>()?
+         .select(["name", "age"])
+
+  2. require_shape(example)
+
+     JSON-native schema by example:
+
+     value
+         .require_shape(json!({
+             "name": "",
+             "age": 0,
+             "metadata": {
+                 "department": ""
+             }
+         }))?
+
+  I’d keep validation methods on JsonStream, returning serde_json::Result<Value> for now. Longer term, a custom error
+  type would be better than forcing schema errors into serde_json::Error, but that is probably the first point where the
+  crate wants its own Error enum.
+
+
+› I agree, let's postpone the error refinement. I like `require_shape` though at some point we will have to think about
+  performance, what can be passed as precomputed reference, etc. But optimization comes later, so let's go with this
+  plan
+
+
+• I’ll add both validation steps on JsonStream: validate_as::<T>() for Serde-backed schema checks, and
+  require_shape(example) for JSON-native shape checks. Since we’re postponing error refinement, I’ll keep returning
+  serde_json::Result<Value> and use readable error messages through an io::Error wrapper for shape failures.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• I’m adding the validation methods now. For require_shape, the rule will be: the example describes required fields and
+  JSON kinds, extra input fields are allowed, object shapes recurse, arrays only assert “array” for now, and numbers are
+  treated as one JSON number kind rather than distinguishing integer/float.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The API methods and shape checker are patched in. I’m adding tests around pass-through behavior, missing fields, wrong
+  types, nested shape checks, and the Serde deserialization validation path.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The validation tests are in. I’m formatting and compiling now; this will also check that the temporary
+  serde_json::Error::io approach is accepted by the current serde_json version.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The tests pass, but the validation test structs trigger dead-code warnings because they only exist for
+  deserialization. I’m cleaning those warnings up and adding require_shape to the README/example flow so the new
+  validation step is visible.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Warnings are addressed and the ETL example now validates its expected input shape before selecting/calculating fields.
+  I’m running the final formatting and full verification.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Implemented the validation layer.
+
+  Added to JsonStream:
+
+  - validate_as::<T>(): attempts serde_json::from_value::<T> and returns the original Value unchanged on success.
+  - require_shape(example): validates required fields and JSON kinds from an example shape.
+
+  require_shape behavior:
+
+  - Extra input fields are allowed.
+  - Missing required fields fail.
+  - Wrong JSON kinds fail.
+  - Nested objects recurse.
+  - Arrays currently only require “is array”; element schema is intentionally deferred.
+  - Numbers are treated as one broad JSON number kind.
+
+  I also updated examples/etl.rs:1 and readme.md:1 to show require_shape before transformation.
+
+  Verification:
+
+  - cargo test passes: 27 unit tests + 3 doctests.
+  - cargo test --examples passes.
+
+
+› I have been thinking, and `eval` should be `merge_eval` since it is a special case of merge. There is a role for a
+  `map` which directly takes a Value and returns a Result<Value>, since now these 'pipelines' can be extended by simply
+  dropping a sub-pipeline into `map` or as a named function - this aids *composibility*. We also need a way of deleting
+  fields `delete` which looks like `add` (consider allowing JSON pointer here). Another way of looking at field
+  deletion is a version of `require_shape` which *only* passes fields which are part of the given shape.
+
+
+• I’ll refactor this in the API direction you described: rename the merge-style evaluator, add a true map, add deletion
+  with top-level/JSON Pointer semantics, and add a shape-filtering operation that validates by example while keeping
+  only shape fields. I’ll read the current source once more, then patch with compatibility in mind where reasonable.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• There’s one Rust method-resolution trap here: Result already has an inherent .map, and inherent methods win over trait
+  methods. So a JsonStream::map method would work on Value, but on serde_json::Result<Value> it would produce nested
+  results via Result::map instead of continuing the pipeline. I’m going to add a true pipeline method as try_map for the
+  Result<Value> chaining case, and still add map on the trait for direct Value usage with that caveat documented.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• For deletion I’m treating missing paths as no-ops, top-level keys as object-field deletion, and JSON Pointer paths as
+  nested deletion. For select_shape, I’ll validate using the same shape rules first, then return only the fields
+  described by the shape, recursively for objects.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• I’ve added the trait surface. Now I’m wiring the deletion and shape-projection helpers and renaming the existing
+  internal uses of eval to merge_eval.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The helper layer is in place. I’m updating tests and examples next so they exercise merge_eval, try_map, delete, and
+  select_shape rather than the old eval name.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• There are only a few user-facing eval call sites left. I’m replacing those with merge_eval, then adding new tests for
+  composable mapping and field removal.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The call sites are updated and the new behavior has focused tests. I’m running rg for stale eval mentions, then
+  formatting and compiling to catch trait or method-resolution issues.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The implementation compiled and all unit tests passed; the only failure is the doctest missing the JsonGet import
+  after the updated example. I’m fixing that import and rerunning verification.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Everything now passes. I’m doing a final quick status check so I can summarize the exact API changes and the one
+  naming caveat around Rust’s built-in Result::map.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Implemented the pipeline API changes.
+
+  Changed/added in src/lib.rs:157:
+
+  - Renamed eval to merge_eval.
+  - Added map for direct Value -> Result<Value> sub-pipelines.
+  - Added try_map for fluent Result<Value> chains, because Rust’s built-in Result::map would otherwise win method
+  resolution.
+  - Added delete, supporting both top-level keys and JSON Pointer paths.
+  - Added select_shape, which validates with the same rules as require_shape, then keeps only fields described by the
+  shape.
+
+  Behavior covered:
+
+  - delete("field")
+  - delete("/nested/field")
+  - delete("/array/1")
+  - missing deletes are no-ops
+  - select_shape recursively removes extra object fields
+  - select_shape fails if required fields/types do not match
+
+  Updated examples/etl.rs:1 and readme.md:1 to use merge_eval.
+
+  Verification:
+
+  - cargo test passes: 35 unit tests + 3 doctests.
+  - cargo test --examples passes.
+
+
+› So our lib.rs is getting rather long, so I think we should separate out the tests into their own module
+
+
+• I’ll move the existing inline unit tests into a separate src/tests.rs module and leave only a #[cfg(test)] mod tests;
+  declaration in lib.rs. Doctests will stay next to the public API docs.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The inline test module starts at line 631 and accounts for roughly half the file. I’m extracting that whole module
+  into src/tests.rs while preserving it as a unit-test module so it can still access crate-private helpers.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• I’m going to keep this as a unit-test module rather than integration tests, because several tests cover crate-private
+  helpers and internal error formatting. The new src/tests.rs will contain the same test bodies without the outer inline
+  module wrapper.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The test split is done mechanically. I’m checking the module boundary and imports now, then I’ll format and run the
+  suite.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• lib.rs is down to the implementation plus a single test-module declaration, and src/tests.rs has the moved tests. I’m
+  running rustfmt and the full verification now.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Moved the inline unit tests out of src/lib.rs:630 into src/tests.rs:1.
+
+  lib.rs now keeps only:
+
+  #[cfg(test)]
+  mod tests;
+
+  The tests remain unit tests, so they can still access crate-private helpers.
+
+  Verification:
+
+  - cargo test passes: 35 unit tests + 3 doctests.
+  - cargo test --examples passes.
+
+
+› We are looking good! I am thinking about `format_value` and there is a useful corresponding `parse_string` which uses
+  exactly the same notation as `format_value` to extract field values from text. Obvious restriction is that the parsed
+  field values may not contain '{}', which is why tools like `sed` allow a person to select different delimiters. But
+  an obvious first pass would already be very useful.
+
+
+• I’ll add a parse_string helper that mirrors format_value placeholders and returns a JSON object of extracted string
+  fields. I’ll make it conservative: literal template segments must match in order, placeholders capture the text
+  between surrounding literals, and malformed/unmatched templates fail with the same temporary serde_json::Error style
+  we’re already using.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• I’m going to keep the return type as serde_json::Result<Value> for pipeline consistency, with successful parses
+  returning a Value::Object containing string values. JSON Pointer placeholders will build nested objects when possible,
+  so {/person/name} yields {"person":{"name":"..."}}.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The public parser function is added. Now I’m adding the small internal template parser and nested-field insertion
+  helpers under the existing formatting helper area.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The parser currently supports top-level fields and object-style JSON Pointer output paths. I’m adding tests for simple
+  extraction, nested pointer extraction, trailing captures, mismatch errors, malformed templates, and repeated fields.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The test coverage is in. I’m updating the README briefly to mention parse_string, then I’ll format and run the suite.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• parse_string is documented and tested. I’m running rustfmt and the full verification now; the main thing to catch is
+  borrow behavior in nested pointer insertion.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Added parse_string in src/lib.rs:80.
+
+  It uses the same placeholder notation as format_value:
+
+  - {field} extracts into a top-level JSON string field.
+  - {/nested/path} extracts into a nested JSON object path.
+  - JSON Pointer escaping works, e.g. {/a~1b/c~0d}.
+  - Literal template text must match in order.
+  - Repeated fields currently overwrite with the later captured value.
+  - Malformed templates and mismatches return serde_json::Error.
+
+  Example:
+
+  let value = parse_string(
+      "Ada Lovelace (corporate)",
+      "{first_name} {last_name} ({/site/name})",
+  )?;
+
+  Verification:
+
+  - cargo test passes: 43 unit tests + 4 doctests.
+  - cargo test --examples passes.
+
+
+› Cool, I like the fact that we can split off the rest of the string with a placeholder at the end. I think we are
+  converging on something focused and useful here. Are there any improvements you can think of at this point?
+
+
+• A few improvements feel worth considering, but I would keep them small and aligned with the current shape.
+
+  1. Add parse_value
+
+  parse_string currently sits outside the fluent pipeline. A parse_value/parse transform could be useful inside
+  merge_eval or try_map:
+
+  let parsed = parse_string(value.get_str("raw", ""), "{name} <{email}>")?;
+
+  This is already possible, so this is mostly about examples rather than API.
+
+  2. Add rename
+
+  ETL pipelines often need field renames:
+
+  value.rename("first_name", "given_name")
+  value.rename("/person/name", "name")
+
+  Semantics could be move-only: if source is missing, no-op; if target exists, overwrite or not? I’d default to
+  overwrite for rename, because it is more like add than merge.
+
+  3. Add copy
+
+  Useful companion to rename:
+
+  value.copy("name", "display_name")
+  value.copy("/person/name", "name")
+
+  This preserves source and writes target.
+
+  4. Decide whether delete should support pointer creation semantics elsewhere
+
+  Right now delete supports JSON Pointer paths. add does not. Eventually we may want:
+
+  .add("/metadata/site", "corporate")
+
+  But that changes current add semantics because a key starting with / could be intended literally. I’d postpone unless
+  pointer writes become common.
+
+  5. Add parse_string delimiter escaping or alternate delimiters
+
+  You already called this out. I’d wait until a real string pattern forces it, but the likely API is:
+
+  parse_string_with(text, template, Delimiters::new("[[", "]]"))
+
+  Or simpler:
+
+  parse_string_delimited(text, template, "[[", "]]")
+
+  6. Split implementation modules soon
+
+  Tests are split now, but lib.rs still contains several concerns. Before adding much more, I’d split into modules:
+
+  src/lib.rs
+  src/format.rs      // format_value, parse_string
+  src/get.rs         // JsonGet
+  src/stream.rs      // JsonStream
+  src/shape.rs       // require_shape/select_shape helpers
+  src/pointer.rs     // resolver/delete/pointer insertion helpers
+  src/tests.rs
+
+  7. Add a real error type
+
+  We’ve intentionally postponed this, but it is probably the next “quality” step before publishing. Current
+  serde_json::Error::io(...) works, but it hides domain errors. A simple crate error would improve diagnostics:
+
+  pub enum Error {
+      Json(serde_json::Error),
+      Shape { path: String, expected: String, found: String },
+      ParseString(String),
+  }
+
+  Then expose:
+
+  pub type Result<T> = std::result::Result<T, Error>;
+
+  My practical next step would be module splitting, then rename/copy. Those add real ETL value without changing the
+  current mental model.
+
+
+› I agree, the suggested semantics for rename/copy make sense
+
+
+• I’ll add rename and copy to JsonStream with the semantics we discussed: source missing is a no-op, rename removes the
+  source then writes the target, and copy preserves the source. I’ll support top-level keys and JSON Pointer paths on
+  both source and target using object creation for pointer targets.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• I’ll reuse the existing pointer insertion helper for rename/copy target writes, but generalize it to insert any Value
+  rather than only parsed strings. That keeps pointer creation behavior consistent across parse_string, copy, and
+  rename.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The trait methods are added for both Value and Result<Value>. I’m adding the helper implementations now, including
+  pointer-source extraction and target overwriting.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Rename/copy helpers are in. One deliberate constraint: pointer target creation builds objects, not arrays, which fits
+  field-oriented ETL and avoids ambiguous array creation semantics for now. I’m adding tests for top-level and pointer
+  cases plus missing source no-ops.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Tests are added. I’m updating README and the ETL example minimally to show rename/copy, then I’ll run formatting and
+  tests.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• One example chain now has a ? before a following rename, which changes the receiver from Result<Value> to Value;
+  that’s valid, but I’m going to let the compiler confirm the exact chain behavior.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Added rename and copy to JsonStream.
+
+  Behavior:
+
+  - rename(from, to) moves a value and overwrites the target if present.
+  - copy(from, to) duplicates a value and preserves the source.
+  - Missing source paths are no-ops.
+  - Both support top-level keys and JSON Pointer paths.
+  - Pointer targets create nested objects as needed.
+
+  Examples:
+
+  value.rename("name", "display_name")?;
+  value.copy("/person/name", "/metadata/display_name")?;
+
+  Updated examples/etl.rs:1 and readme.md:1.
+
+  Verification:
+
+  - cargo test passes: 50 unit tests + 4 doctests.
+  - cargo test --examples passes.
+
+
+› This feels right. As for `add` and keys starting with '/': that would be unusual, given that most fieldnames are
+  identifier-like. Altho `merge` gives complete flexibilty on adding a field at any depth! I think we need a proper
+  Error enum and with a few more examples we have a first version.
+
+
+• I’ll replace the temporary serde_json::Result surface with a crate-owned Result<T> and Error enum, preserving JSON/
+  serialization errors via From<serde_json::Error>. Then I’ll update examples/tests to compile against the new result
+  type and add a couple of examples that show parsing and composable sub-pipelines.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The API currently returns serde_json::Result everywhere, and tests/examples assume that. I’m going to introduce pub
+  type Result<T> plus Error::{Json, Shape, ParseString}, then change pipeline methods to return the crate result while
+  still implementing the trait for serde_json::Result<Value> so parse chains remain ergonomic.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The imports have shifted slightly under rustfmt, so I’m re-opening the top of the file and applying the error type
+  against the actual current import block.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• I’m changing the public return types from serde_json::Result<T> to jstream::Result<T>. The one non-mechanical part is
+  the impl JsonStream for serde_json::Result<Value>: it now needs to convert the initial serde error into Error::Json
+  before continuing.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The mechanical replacement exposed two expected cleanups: require_shape_at needs a plain std::result::Result because
+  it returns string diagnostics internally, and the shape/parse helpers should construct the new enum variants directly.
+  I’m also adding a dedicated implementation for serde_json::Result<Value> so
+  serde_json::from_str(...).require_shape(...) still chains.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The new error enum is wired into the library. I’m updating example/test signatures from serde_json::Result to
+  jstream::Result, then I’ll compile and address any remaining doctest fallout.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The bulk replacement accidentally changed the new serde_json::Result<Value> impl into a duplicate crate-result impl.
+  I’m correcting that specific impl and fixing the doc wording.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The type surface is consistent now. I’m formatting and compiling to see what downstream signatures/tests need
+  adjustment for the new enum.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The compiler errors show the opposite duplicate problem: the first result-wrapper impl was changed to
+  serde_json::Result. I’m restoring the crate Result<Value> impl and leaving the second impl for
+  serde_json::Result<Value>.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The two wrapper impls are adjacent, so I’m just swapping their headers: the and_then version belongs to
+  jstream::Result<Value>, and the match/conversion version belongs to serde_json::Result<Value>.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• That should resolve the wrapper mismatch. I’m rerunning formatting and tests.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The core refactor compiles and tests pass. I’m adding two representative examples now: one for parse_string, and one
+  showing a named fallible sub-pipeline passed through try_map.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The examples are in. I’m running the full suite including examples; then I’ll do a quick grep for stale
+  serde_json::Result wording.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Compilation is clean. I’m adding a few targeted assertions that the new enum variants are actually used, not just that
+  their display strings match.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The variant-level tests are in. I’m running final verification and a status check.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Added a proper crate error surface.
+
+  What changed:
+
+  - Added pub type Result<T> = std::result::Result<T, Error>.
+  - Added pub enum Error with:
+      - Error::Json(serde_json::Error)
+      - Error::Shape(String)
+      - Error::ParseString(String)
+
+  - Implemented Display, std::error::Error, and From<serde_json::Error>.
+  - Updated all jstream operations to return jstream::Result.
+  - Kept chaining from serde_json::from_str::<Value>(...) working by retaining JsonStream support for
+  serde_json::Result<Value>.
+
+  Also added examples:
+
+  - examples/parse_string.rs:1
+  - examples/sub_pipeline.rs:1
+
+  Verification:
+
+  - cargo test passes: 50 unit tests + 4 doctests.
+  - cargo test --examples passes.
+
+
+› The example in the readme is incomplete, no sign that the `parsed` value passes into the pipeline (and what `text`
+  is). I would suggest ending with an assert so it is obvious what the result is going to be.
+
+
+• I’ll tighten the README into a complete runnable example: define text, feed the parse_string result into the pipeline
+  via merge, and end with an assertion that shows the final JSON.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The README example currently also has a subtle ordering issue: select(["name", "date", "age"]) drops metadata, so the
+  later format_value(...{/metadata/department}) cannot see it. I’m going to make the example preserve metadata until
+  after calculated fields are created.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• I’ve made the example complete and concrete. I’m going to run the equivalent snippet quickly as a temporary example-
+  style program mentally isn’t enough here; compiling tests/examples will catch syntax, but I’ll also verify the
+  expected output with a small cargo test pass.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Updated readme.md:1 so the example is complete:
+
+  - Defines text.
+  - Uses parse_string.
+  - Merges the parsed value into the JSON pipeline.
+  - Preserves metadata long enough for format_value.
+  - Ends with an assert_eq! showing the final JSON result.
+
+  Verification still passes:
+
+  - cargo test
+  - cargo test --examples
+
+
+› Much better! The example would be better if the text to be parsed comes from a field in the data, and use
+  `merge_eval`. It might be useful if there's a `.parse_text` method, passed a field name for the value and the format
+  string
+
+
+• I’ll add a parse_text pipeline method that reads a string field or JSON Pointer path, parses it with the same template
+  syntax as parse_string, and merges the parsed fields without overriding existing fields. Then I’ll update the README
+  example so the raw text comes from the input data and is parsed through the pipeline.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The method is now in the trait and both wrappers. I’m adding tests for top-level field parsing, JSON Pointer source
+  fields, no-override merge behavior, and result-chain usage.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• I’m updating the README to put the parseable string inside the JSON input and use .parse_text(...) in the chain before
+  validation/calculation.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The README now demonstrates parsing a field from the source JSON. I’m also updating the standalone parse_string
+  example to mention parse_text isn’t required there, then I’ll run tests.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The standalone example did not need a real change. I’m running formatting and the full test suite now; I expect the
+  README result assertion to remain correct after deleting the raw field.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Added .parse_text(field, template) to JsonStream.
+
+  Behavior:
+
+  - Reads a top-level field or JSON Pointer source.
+  - Parses the string using the same placeholder notation as parse_string.
+  - Merges extracted fields without overriding existing fields.
+  - Missing/null/non-string source fields are treated as "".
+
+  Updated the README so the parsed text comes from "raw" in the input JSON:
+
+  .parse_text("raw", "{name} ({/metadata/department})")
+
+  Then the pipeline validates, transforms, deletes raw, and asserts the final JSON.
+
+  Verification:
+
+  - cargo test passes: 53 unit tests + 4 doctests.
+  - cargo test --examples passes.
+
+
+› This feels enough for now. There is a lot of other things one would want to do in an ETL pipeline, attach ingestion
+  date, use regular expressions for advanced parsing, etc but people can always bring their favourite libraries to do
+  that, rather than baking them in the base library
+
+
+• Agreed. The current core is focused: JSON-shaped transformations, lightweight validation, field access, simple string
+  formatting/parsing, and composable escape hatches via try_map/named functions.
+
+  That leaves the right extension points for ETL-specific needs:
+
+  - ingestion timestamps via merge_eval or add
+  - regex parsing via try_map
+  - richer validation via validate_as::<T>()
+  - custom normalization via named sub-pipelines
+  - domain-specific conversion without growing the base crate
+
+  The next sensible step later would be documentation polish and maybe module splitting, not adding more ETL features
+  right now.
+
+
+› exit
+
