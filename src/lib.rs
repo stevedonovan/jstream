@@ -392,7 +392,9 @@ pub trait JsonStream {
     /// Keep only the requested fields.
     ///
     /// Missing fields are included with a JSON `null` value. Non-object inputs
-    /// are treated as empty objects.
+    /// are treated as empty objects. They may be renamed with '<old> as <new>'
+    /// Fields may be JSON pointers - without a rename, the new key becomes
+    /// the last part of the pointer (so '/path/to/data' becomes 'data')
     fn select<K, I>(self, keys: I) -> Result<Value>
     where
         K: AsRef<str>,
@@ -493,17 +495,23 @@ impl JsonStream for Value {
         K: AsRef<str>,
         I: IntoIterator<Item = K>,
     {
-        let source = match self {
-            Value::Object(object) => object,
-            _ => Map::new(),
-        };
-
         let selected = keys
             .into_iter()
             .map(|key| {
-                let key = key.as_ref().to_owned();
-                let value = source.get(&key).cloned().unwrap_or(Value::Null);
-                (key, value)
+                let key = key.as_ref();
+                let (key,out_key) = if let Some(idx) = key.find(" as ") {
+                    (key[0..idx].trim(), key[idx + 4 ..] .trim())
+                } else {
+                    if key.starts_with('/') {
+                        let idx = key.rfind('/').unwrap();
+                        let last = &key[idx+1 ..];
+                        (key, last)
+                    } else {
+                        (key, key)
+                    }
+                };
+                let value = resolve_value(&self,&key).cloned().unwrap_or(Value::Null);
+                (out_key.to_owned(), value)
             })
             .collect();
 

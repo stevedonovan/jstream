@@ -23,6 +23,30 @@ fn select_keeps_requested_fields_and_fills_missing_ones() {
 }
 
 #[test]
+fn select_can_rename_and_use_pointers() {
+    let value = json!({
+        "name": "Ada",
+        "age": 37,
+        "ignored": true,
+        "context": {
+            "skill": "mathematics"
+        }
+    });
+
+    let selected = value.select(["name as first_name", "date", "age", "/context/skill"]).unwrap();
+
+    assert_eq!(
+        selected,
+        json!({
+            "first_name": "Ada",
+            "date": null,
+            "age": 37,
+            "skill": "mathematics"
+        })
+    );
+}
+
+#[test]
 fn select_treats_non_objects_as_empty_objects() {
     let selected = json!(42).select(["name"]).unwrap();
 
