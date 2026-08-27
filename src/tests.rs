@@ -1,6 +1,6 @@
 use super::*;
-use serde::Deserialize;
-use serde_json::json;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, json};
 
 #[test]
 fn filter_passes_matching_values_through() {

@@ -69,7 +69,7 @@ fn main() -> jstream::Result<()> {
 handled with one final `?`.
 
 - `select(["a", "b"])`: keep requested top-level fields, inserting `null` for missing fields. The field lookup
-   can be a JSON pointer, like '/field/sub', and/or there can be a rename expression like 'old as new'
+  can be a JSON pointer, like '/field/sub', and/or there can be a rename expression like 'old as new'
 - `filter(|value| predicate)`: pass matching records through and turn non-matching records into `null`.
 - `try_filter(|value| fallible_predicate)`: the fallible counterpart to `filter`.
 - `add("field", value)`: add or replace a top-level field with any serializable value.
@@ -117,6 +117,7 @@ let value = json!({"num": 1})
     })?;
 
 assert_eq!(value, json!({"num": 1, "is_non_zero": true}));
+# Ok::<(), jstream::Error>(())
 ```
 
 Use `replace_eval` when calculated fields should overwrite existing values. This is useful after
@@ -146,6 +147,7 @@ assert_eq!(
         "day": 20
     })
 );
+# Ok::<(), jstream::Error>(())
 ```
 
 ## Text Helpers
@@ -163,7 +165,13 @@ into a JSON object. Note that the last placeholder picks up the _rest of the tex
 `JsonGet` provides typed accessors with explicit defaults:
 
 ```rust
-use jstream::JsonGet;
+use jstream::{JsonGet, json};
+
+let value = json!({
+    "name": "Ada",
+    "age": 37,
+    "metadata": { "active": true }
+});
 
 let name = value.get_str("name", "unknown");
 let age = value.get_i64("age", 0);
