@@ -70,6 +70,7 @@ handled with one final `?`.
 
 - `select(["a", "b"])`: keep requested top-level fields, inserting `null` for missing fields. The field lookup
    can be a JSON pointer, like '/field/sub', and/or there can be a rename expression like 'old as new'
+- `filter(|value| predicate)`: pass matching records through and turn non-matching records into `null`.
 - `add("field", value)`: add or replace a top-level field with any serializable value.
 - `merge(json!({...}))`: shallow merge object fields without replacing existing fields.
 - `merge_eval(|value| json!({...}))`: calculate fields from the current value, then merge them.
@@ -80,10 +81,25 @@ handled with one final `?`.
 - `require_shape(json!({...}))`: require fields and JSON types described by an example shape.
 - `select_shape(json!({...}))`: validate a shape, then keep only fields described by that shape.
 - `validate_as::<T>()`: validate by attempting to deserialize into a Rust type; the value is passed through.
+- `transform(function)`: apply an infallible whole-value transformation.
 - `try_map(function)`: apply a fallible operation to the data.
 
 Note that `merge`, `merge_eval`, and `replace_eval` silently skip calculated values that are not
 objects.
+
+JSON `null` is an absorbing pipeline value. Once `filter` rejects a record, later `JsonStream`
+methods preserve it and do not invoke their closures:
+
+```rust
+use jstream::{JsonGet, JsonStream, json};
+
+let value = json!({ "name": "Ada", "age": 17 })
+    .filter(|value| value.get_i64("age", 0) >= 18)
+    .add("category", "adult")?;
+
+assert_eq!(value, json!(null));
+# Ok::<(), jstream::Error>(())
+```
 
 This gives us a way to conditionally add fields:
 
@@ -111,7 +127,7 @@ use jstream::{JsonGet, JsonStream, json};
 let value = json!({ "date": "2025-05-20" })
     .parse_text("date", "{year}-{month}-{day}") // extra fields "year","month" and "day" are strings
     .replace_eval(|value| {
-        let part = |field| value.get_i64(field, 0);
+        let part = |field| value.get_str(field, "0").parse::<i64>().unwrap_or_default();
 
         json!({
             "year": part("year"),
@@ -159,7 +175,8 @@ The same top-level-or-JSON-Pointer lookup rules apply to `get_f64`,
 
 ## Sub-Pipelines
 
-Use `try_map` to create a processing pipeline with composition:
+Use `transform` and `try_map` to compose custom infallible and fallible operations without adding
+domain-specific functionality to jstream:
 
 ```rust
 use jstream::{JsonGet, JsonStream, Result};
@@ -191,6 +208,28 @@ fn main() -> Result<()> {
 
     Ok(())
 }
+```
+
+## Errors
+
+Shape and text-parsing errors contain structured data that applications can match without parsing
+their display messages:
+
+```rust
+use jstream::{Error, JsonKind, JsonStream, json};
+
+let error = json!({ "age": "unknown" })
+    .require_shape(json!({ "age": 0 }))
+    .unwrap_err();
+
+assert!(matches!(
+    error,
+    Error::Shape {
+        expected: JsonKind::Number,
+        actual: Some(JsonKind::String),
+        ..
+    }
+));
 ```
 
 ## Authorship

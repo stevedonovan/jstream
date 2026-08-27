@@ -93,17 +93,96 @@ pub enum Error {
     /// A serde_json parse, serialization, or deserialization error.
     Json(serde_json::Error),
     /// A value did not match the required example shape.
-    Shape(String),
-    /// Text did not match a `parse_string` template.
-    ParseString(String),
+    Shape {
+        /// Path to the value that failed validation.
+        path: String,
+        /// JSON kind required by the example shape.
+        expected: JsonKind,
+        /// Actual JSON kind, or `None` when the field was missing.
+        actual: Option<JsonKind>,
+    },
+    /// Text or a template could not be processed by [`parse_string`].
+    ParseString {
+        /// Category of parse failure.
+        kind: ParseStringErrorKind,
+        /// Byte position in the template or input, when applicable.
+        position: Option<usize>,
+    },
+}
+
+/// The JSON value categories used by shape validation errors.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum JsonKind {
+    /// JSON `null`.
+    Null,
+    /// A JSON boolean.
+    Bool,
+    /// A JSON number.
+    Number,
+    /// A JSON string.
+    String,
+    /// A JSON array.
+    Array,
+    /// A JSON object.
+    Object,
+}
+
+impl fmt::Display for JsonKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            JsonKind::Null => "null",
+            JsonKind::Bool => "bool",
+            JsonKind::Number => "number",
+            JsonKind::String => "string",
+            JsonKind::Array => "array",
+            JsonKind::Object => "object",
+        })
+    }
+}
+
+/// Categories of [`parse_string`] failure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ParseStringErrorKind {
+    /// A `{` in the template has no corresponding `}`.
+    UnmatchedOpeningBrace,
+    /// The template contains `{}`.
+    EmptyPlaceholder,
+    /// A JSON Pointer output path is empty.
+    EmptyPointer,
+    /// Literal template text could not be found in the input.
+    ExpectedLiteral {
+        /// Literal text that was expected.
+        literal: String,
+        /// Preceding field, when the literal delimits a captured field.
+        after_field: Option<String>,
+    },
+    /// Input remained after the complete template matched.
+    TrailingInput,
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Json(error) => write!(f, "{error}"),
-            Error::Shape(message) => write!(f, "{message}"),
-            Error::ParseString(message) => write!(f, "{message}"),
+            Error::Shape {
+                path,
+                expected,
+                actual: Some(actual),
+            } => write!(f, "{path}: expected {expected}, found {actual}"),
+            Error::Shape {
+                path,
+                expected: _,
+                actual: None,
+            } => write!(f, "{path}: missing required field"),
+            Error::ParseString { kind, position } => {
+                write!(f, "{kind}")?;
+                if let Some(position) = position {
+                    write!(f, " at byte {position}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -112,7 +191,26 @@ impl error::Error for Error {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
             Error::Json(error) => Some(error),
-            Error::Shape(_) | Error::ParseString(_) => None,
+            Error::Shape { .. } | Error::ParseString { .. } => None,
+        }
+    }
+}
+
+impl fmt::Display for ParseStringErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnmatchedOpeningBrace => f.write_str("unmatched opening brace in template"),
+            Self::EmptyPlaceholder => f.write_str("empty field placeholder in template"),
+            Self::EmptyPointer => f.write_str("JSON Pointer field must not be empty"),
+            Self::ExpectedLiteral {
+                literal,
+                after_field: Some(field),
+            } => write!(f, "expected literal {literal:?} after field {field:?}"),
+            Self::ExpectedLiteral {
+                literal,
+                after_field: None,
+            } => write!(f, "expected literal {literal:?}"),
+            Self::TrailingInput => f.write_str("unparsed trailing input"),
         }
     }
 }
@@ -220,9 +318,13 @@ pub fn parse_string(text: &str, template: &str) -> Result<Value> {
         match &template[index] {
             TemplatePart::Literal(literal) => {
                 let Some(next) = remaining.strip_prefix(literal) else {
-                    return Err(parse_error(format!(
-                        "expected literal {literal:?} at {remaining:?}"
-                    )));
+                    return Err(parse_error(
+                        ParseStringErrorKind::ExpectedLiteral {
+                            literal: literal.clone(),
+                            after_field: None,
+                        },
+                        Some(text.len() - remaining.len()),
+                    ));
                 };
                 remaining = next;
             }
@@ -235,9 +337,13 @@ pub fn parse_string(text: &str, template: &str) -> Result<Value> {
                 let captured = match next_literal {
                     Some(literal) => {
                         let Some(end) = remaining.find(literal) else {
-                            return Err(parse_error(format!(
-                                "expected literal {literal:?} after field {key:?}"
-                            )));
+                            return Err(parse_error(
+                                ParseStringErrorKind::ExpectedLiteral {
+                                    literal: literal.to_owned(),
+                                    after_field: Some(key.clone()),
+                                },
+                                Some(text.len() - remaining.len()),
+                            ));
                         };
                         let captured = &remaining[..end];
                         remaining = &remaining[end..];
@@ -256,9 +362,10 @@ pub fn parse_string(text: &str, template: &str) -> Result<Value> {
     }
 
     if !remaining.is_empty() {
-        return Err(parse_error(format!(
-            "unparsed trailing input {remaining:?}"
-        )));
+        return Err(parse_error(
+            ParseStringErrorKind::TrailingInput,
+            Some(text.len() - remaining.len()),
+        ));
     }
 
     Ok(Value::Object(fields))
@@ -389,10 +496,20 @@ impl JsonGet for Value {
 /// # }
 /// ```
 pub trait JsonStream {
+    /// Pass the current value through when `predicate` returns `true`, or
+    /// replace it with JSON `null` when it returns `false`.
+    ///
+    /// JSON `null` is an absorbing pipeline value: subsequent [`JsonStream`]
+    /// methods preserve it without invoking their closures.
+    fn filter<F>(self, predicate: F) -> Result<Value>
+    where
+        F: FnOnce(&Value) -> bool;
+
     /// Keep only the requested fields.
     ///
-    /// Missing fields are included with a JSON `null` value. Non-object inputs
-    /// are treated as empty objects. They may be renamed with '<old> as <new>'
+    /// Missing fields are included with a JSON `null` value. Non-null,
+    /// non-object inputs are treated as empty objects. They may be renamed with
+    /// `old as new`.
     /// Fields may be JSON pointers - without a rename, the new key becomes
     /// the last part of the pointer (so '/path/to/data' becomes 'data')
     fn select<K, I>(self, keys: I) -> Result<Value>
@@ -402,8 +519,8 @@ pub trait JsonStream {
 
     /// Add or replace a field with any value that can be serialized to JSON.
     ///
-    /// Non-object inputs are converted into a new object containing the added
-    /// field.
+    /// Non-null, non-object inputs are converted into a new object containing
+    /// the added field.
     fn add<K, V>(self, key: K, value: V) -> Result<Value>
     where
         K: Into<String>,
@@ -411,7 +528,8 @@ pub trait JsonStream {
 
     /// Merge fields from another object without replacing existing fields.
     ///
-    /// This is a shallow merge. Non-object inputs are treated as empty objects.
+    /// This is a shallow merge. Non-null, non-object inputs are treated as
+    /// empty objects.
     fn merge<V>(self, value: V) -> Result<Value>
     where
         V: Serialize;
@@ -436,6 +554,11 @@ pub trait JsonStream {
     fn parse_text<K>(self, key: K, template: &str) -> Result<Value>
     where
         K: AsRef<str>;
+
+    /// Transform the current value with an infallible function.
+    fn transform<F>(self, f: F) -> Result<Value>
+    where
+        F: FnOnce(Value) -> Value;
 
     /// Transform the current value with a fallible function.
     fn try_map<F>(self, f: F) -> Result<Value>
@@ -490,27 +613,42 @@ pub trait JsonStream {
 }
 
 impl JsonStream for Value {
+    fn filter<F>(self, predicate: F) -> Result<Value>
+    where
+        F: FnOnce(&Value) -> bool,
+    {
+        if self.is_null() || predicate(&self) {
+            Ok(self)
+        } else {
+            Ok(Value::Null)
+        }
+    }
+
     fn select<K, I>(self, keys: I) -> Result<Value>
     where
         K: AsRef<str>,
         I: IntoIterator<Item = K>,
     {
+        if self.is_null() {
+            return Ok(self);
+        }
+
         let selected = keys
             .into_iter()
             .map(|key| {
                 let key = key.as_ref();
-                let (key,out_key) = if let Some(idx) = key.find(" as ") {
-                    (key[0..idx].trim(), key[idx + 4 ..] .trim())
+                let (key, out_key) = if let Some(idx) = key.find(" as ") {
+                    (key[0..idx].trim(), key[idx + 4..].trim())
                 } else {
                     if key.starts_with('/') {
                         let idx = key.rfind('/').unwrap();
-                        let last = &key[idx+1 ..];
+                        let last = &key[idx + 1..];
                         (key, last)
                     } else {
                         (key, key)
                     }
                 };
-                let value = resolve_value(&self,&key).cloned().unwrap_or(Value::Null);
+                let value = resolve_value(&self, key).cloned().unwrap_or(Value::Null);
                 (out_key.to_owned(), value)
             })
             .collect();
@@ -523,6 +661,10 @@ impl JsonStream for Value {
         K: Into<String>,
         V: Serialize,
     {
+        if self.is_null() {
+            return Ok(self);
+        }
+
         let mut object = match self {
             Value::Object(object) => object,
             _ => Map::new(),
@@ -536,6 +678,10 @@ impl JsonStream for Value {
     where
         V: Serialize,
     {
+        if self.is_null() {
+            return Ok(self);
+        }
+
         merge_values(self, serde_json::to_value(value)?)
     }
 
@@ -543,6 +689,10 @@ impl JsonStream for Value {
     where
         F: FnOnce(&Value) -> Value,
     {
+        if self.is_null() {
+            return Ok(self);
+        }
+
         let fields = f(&self);
         merge_values(self, fields)
     }
@@ -551,6 +701,10 @@ impl JsonStream for Value {
     where
         F: FnOnce(&Value) -> Value,
     {
+        if self.is_null() {
+            return Ok(self);
+        }
+
         let fields = f(&self);
         replace_values(self, fields)
     }
@@ -559,15 +713,30 @@ impl JsonStream for Value {
     where
         K: AsRef<str>,
     {
+        if self.is_null() {
+            return Ok(self);
+        }
+
         let parsed = parse_string(format_field(&self, key.as_ref()).as_str(), template)?;
         merge_values(self, parsed)
+    }
+
+    fn transform<F>(self, f: F) -> Result<Value>
+    where
+        F: FnOnce(Value) -> Value,
+    {
+        if self.is_null() {
+            Ok(self)
+        } else {
+            Ok(f(self))
+        }
     }
 
     fn try_map<F>(self, f: F) -> Result<Value>
     where
         F: FnOnce(Value) -> Result<Value>,
     {
-        f(self)
+        if self.is_null() { Ok(self) } else { f(self) }
     }
 
     fn delete<K>(self, key: K) -> Result<Value>
@@ -597,6 +766,10 @@ impl JsonStream for Value {
     where
         T: DeserializeOwned,
     {
+        if self.is_null() {
+            return Ok(self);
+        }
+
         serde_json::from_value::<T>(self.clone())?;
         Ok(self)
     }
@@ -605,6 +778,10 @@ impl JsonStream for Value {
     where
         V: Serialize,
     {
+        if self.is_null() {
+            return Ok(self);
+        }
+
         let shape = serde_json::to_value(shape)?;
         require_shape_value(&self, &shape)?;
         Ok(self)
@@ -614,6 +791,10 @@ impl JsonStream for Value {
     where
         V: Serialize,
     {
+        if self.is_null() {
+            return Ok(self);
+        }
+
         let shape = serde_json::to_value(shape)?;
         require_shape_value(&self, &shape)?;
         Ok(select_shape_value(&self, &shape))
@@ -621,6 +802,13 @@ impl JsonStream for Value {
 }
 
 impl JsonStream for Result<Value> {
+    fn filter<F>(self, predicate: F) -> Result<Value>
+    where
+        F: FnOnce(&Value) -> bool,
+    {
+        self.and_then(|value| value.filter(predicate))
+    }
+
     fn select<K, I>(self, keys: I) -> Result<Value>
     where
         K: AsRef<str>,
@@ -665,11 +853,18 @@ impl JsonStream for Result<Value> {
         self.and_then(|json| json.parse_text(key, template))
     }
 
+    fn transform<F>(self, f: F) -> Result<Value>
+    where
+        F: FnOnce(Value) -> Value,
+    {
+        self.and_then(|json| json.transform(f))
+    }
+
     fn try_map<F>(self, f: F) -> Result<Value>
     where
         F: FnOnce(Value) -> Result<Value>,
     {
-        self.and_then(f)
+        self.and_then(|json| json.try_map(f))
     }
 
     fn delete<K>(self, key: K) -> Result<Value>
@@ -718,6 +913,16 @@ impl JsonStream for Result<Value> {
 }
 
 impl JsonStream for serde_json::Result<Value> {
+    fn filter<F>(self, predicate: F) -> Result<Value>
+    where
+        F: FnOnce(&Value) -> bool,
+    {
+        match self {
+            Ok(value) => value.filter(predicate),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     fn select<K, I>(self, keys: I) -> Result<Value>
     where
         K: AsRef<str>,
@@ -780,12 +985,22 @@ impl JsonStream for serde_json::Result<Value> {
         }
     }
 
+    fn transform<F>(self, f: F) -> Result<Value>
+    where
+        F: FnOnce(Value) -> Value,
+    {
+        match self {
+            Ok(json) => json.transform(f),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     fn try_map<F>(self, f: F) -> Result<Value>
     where
         F: FnOnce(Value) -> Result<Value>,
     {
         match self {
-            Ok(json) => f(json),
+            Ok(json) => json.try_map(f),
             Err(error) => Err(error.into()),
         }
     }
@@ -1051,10 +1266,10 @@ fn delete_pointer(value: &mut Value, pointer: &str) {
             object.remove(&token);
         }
         Value::Array(array) => {
-            if let Ok(index) = token.parse::<usize>() {
-                if index < array.len() {
-                    array.remove(index);
-                }
+            if let Ok(index) = token.parse::<usize>()
+                && index < array.len()
+            {
+                array.remove(index);
             }
         }
         _ => {}
@@ -1113,12 +1328,18 @@ fn parse_template(template: &str) -> Result<Vec<TemplatePart>> {
 
         let placeholder = &rest[start + 1..];
         let Some(end) = placeholder.find('}') else {
-            return Err(parse_error("unmatched opening brace in template"));
+            return Err(parse_error(
+                ParseStringErrorKind::UnmatchedOpeningBrace,
+                Some(template.len() - rest.len() + start),
+            ));
         };
 
         let key = &placeholder[..end];
         if key.is_empty() {
-            return Err(parse_error("empty field placeholder in template"));
+            return Err(parse_error(
+                ParseStringErrorKind::EmptyPlaceholder,
+                Some(template.len() - rest.len() + start),
+            ));
         }
 
         parts.push(TemplatePart::Field(key.to_owned()));
@@ -1152,7 +1373,7 @@ fn insert_pointer_field(
         .map(unescape_pointer_token)
         .peekable();
     let Some(mut token) = tokens.next() else {
-        return Err(parse_error("JSON Pointer field must not be empty"));
+        return Err(parse_error(ParseStringErrorKind::EmptyPointer, None));
     };
 
     let mut current = fields;
@@ -1177,7 +1398,7 @@ fn insert_pointer_field(
 }
 
 fn require_shape_value(value: &Value, shape: &Value) -> Result<()> {
-    require_shape_at(value, shape, "$").map_err(shape_error)
+    require_shape_at(value, shape, "$")
 }
 
 fn select_shape_value(value: &Value, shape: &Value) -> Value {
@@ -1197,20 +1418,17 @@ fn select_shape_value(value: &Value, shape: &Value) -> Value {
     }
 }
 
-fn require_shape_at(value: &Value, shape: &Value, path: &str) -> std::result::Result<(), String> {
+fn require_shape_at(value: &Value, shape: &Value, path: &str) -> Result<()> {
     match shape {
         Value::Object(shape_object) => {
             let Some(value_object) = value.as_object() else {
-                return Err(format!(
-                    "{path}: expected object, found {}",
-                    json_kind(value)
-                ));
+                return Err(shape_error(path, JsonKind::Object, Some(json_kind(value))));
             };
 
             for (key, expected) in shape_object {
                 let field_path = format!("{path}.{key}");
                 let Some(actual) = value_object.get(key) else {
-                    return Err(format!("{field_path}: missing required field"));
+                    return Err(shape_error(&field_path, json_kind(expected), None));
                 };
 
                 require_shape_at(actual, expected, &field_path)?;
@@ -1222,20 +1440,17 @@ fn require_shape_at(value: &Value, shape: &Value, path: &str) -> std::result::Re
             if value.is_array() {
                 Ok(())
             } else {
-                Err(format!(
-                    "{path}: expected array, found {}",
-                    json_kind(value)
-                ))
+                Err(shape_error(path, JsonKind::Array, Some(json_kind(value))))
             }
         }
         expected => {
             if same_json_kind(value, expected) {
                 Ok(())
             } else {
-                Err(format!(
-                    "{path}: expected {}, found {}",
+                Err(shape_error(
+                    path,
                     json_kind(expected),
-                    json_kind(value)
+                    Some(json_kind(value)),
                 ))
             }
         }
@@ -1254,23 +1469,27 @@ fn same_json_kind(left: &Value, right: &Value) -> bool {
     )
 }
 
-fn json_kind(value: &Value) -> &'static str {
+fn json_kind(value: &Value) -> JsonKind {
     match value {
-        Value::Null => "null",
-        Value::Bool(_) => "bool",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
+        Value::Null => JsonKind::Null,
+        Value::Bool(_) => JsonKind::Bool,
+        Value::Number(_) => JsonKind::Number,
+        Value::String(_) => JsonKind::String,
+        Value::Array(_) => JsonKind::Array,
+        Value::Object(_) => JsonKind::Object,
     }
 }
 
-fn shape_error(message: String) -> Error {
-    Error::Shape(message)
+fn shape_error(path: &str, expected: JsonKind, actual: Option<JsonKind>) -> Error {
+    Error::Shape {
+        path: path.to_owned(),
+        expected,
+        actual,
+    }
 }
 
-fn parse_error(message: impl Into<String>) -> Error {
-    Error::ParseString(message.into())
+fn parse_error(kind: ParseStringErrorKind, position: Option<usize>) -> Error {
+    Error::ParseString { kind, position }
 }
 
 #[cfg(test)]

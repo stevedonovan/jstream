@@ -3,6 +3,90 @@ use serde::Deserialize;
 use serde_json::json;
 
 #[test]
+fn filter_passes_matching_values_through() {
+    let input = json!({ "name": "Ada", "age": 37 });
+    let value = input
+        .clone()
+        .filter(|value| value.get_i64("age", 0) == 37)
+        .unwrap();
+
+    assert_eq!(value, input);
+}
+
+#[test]
+fn filter_replaces_non_matching_values_with_null() {
+    let value = json!({ "name": "Ada", "age": 17 })
+        .filter(|value| value.get_i64("age", 0) >= 18)
+        .unwrap();
+
+    assert_eq!(value, Value::Null);
+}
+
+#[test]
+fn filtered_null_is_preserved_by_the_rest_of_the_pipeline() {
+    #[derive(Deserialize)]
+    struct RequiredRecord {
+        _name: String,
+    }
+
+    let value = json!({ "name": "Ada" })
+        .filter(|_| false)
+        .filter(|_| panic!("filter predicate should not run for null"))
+        .select(["name"])
+        .add("added", true)
+        .merge(json!({ "merged": true }))
+        .merge_eval(|_| panic!("merge_eval closure should not run for null"))
+        .replace_eval(|_| panic!("replace_eval closure should not run for null"))
+        .parse_text("missing", "this template cannot match")
+        .try_map(|_| panic!("try_map closure should not run for null"))
+        .delete("name")
+        .rename("name", "renamed")
+        .copy("name", "copied")
+        .validate_as::<RequiredRecord>()
+        .require_shape(json!({ "required": "" }))
+        .select_shape(json!({ "required": "" }))
+        .unwrap();
+
+    assert_eq!(value, Value::Null);
+}
+
+#[test]
+fn filter_works_on_serde_json_result_pipelines() {
+    let value = serde_json::from_str::<Value>(r#"{"age":17}"#)
+        .filter(|value| value.get_i64("age", 0) >= 18)
+        .add("category", "adult")
+        .unwrap();
+
+    assert_eq!(value, Value::Null);
+}
+
+#[test]
+fn transform_applies_infallible_whole_value_functions() {
+    let value = json!({ "name": "Ada" })
+        .transform(|mut value| {
+            value["normalized"] = json!(true);
+            value
+        })
+        .unwrap();
+
+    assert_eq!(value, json!({ "name": "Ada", "normalized": true }));
+}
+
+#[test]
+fn transform_works_in_result_pipelines_and_preserves_null() {
+    let value = serde_json::from_str::<Value>(r#"{"name":"Ada"}"#)
+        .transform(|mut value| {
+            value["normalized"] = json!(true);
+            value
+        })
+        .filter(|_| false)
+        .transform(|_| panic!("transform closure should not run for null"))
+        .unwrap();
+
+    assert_eq!(value, Value::Null);
+}
+
+#[test]
 fn select_keeps_requested_fields_and_fills_missing_ones() {
     let value = json!({
         "name": "Ada",
@@ -33,7 +117,9 @@ fn select_can_rename_and_use_pointers() {
         }
     });
 
-    let selected = value.select(["name as first_name", "date", "age", "/context/skill"]).unwrap();
+    let selected = value
+        .select(["name as first_name", "date", "age", "/context/skill"])
+        .unwrap();
 
     assert_eq!(
         selected,
@@ -591,7 +677,14 @@ fn require_shape_fails_for_missing_fields() {
     }))
     .unwrap_err();
 
-    assert!(matches!(error, Error::Shape(_)));
+    assert!(matches!(
+        &error,
+        Error::Shape {
+            path,
+            expected: JsonKind::Number,
+            actual: None
+        } if path == "$.age"
+    ));
     assert!(error.to_string().contains("$.age: missing required field"));
 }
 
@@ -606,6 +699,15 @@ fn require_shape_fails_for_wrong_field_types() {
         "age": 0
     }))
     .unwrap_err();
+
+    assert!(matches!(
+        &error,
+        Error::Shape {
+            path,
+            expected: JsonKind::Number,
+            actual: Some(JsonKind::String)
+        } if path == "$.age"
+    ));
 
     assert!(
         error
@@ -863,7 +965,13 @@ fn parse_string_later_repeated_fields_replace_earlier_ones() {
 fn parse_string_returns_error_when_literals_do_not_match() {
     let error = parse_string("Ada Lovelace", "{first_name}, {last_name}").unwrap_err();
 
-    assert!(matches!(error, Error::ParseString(_)));
+    assert!(matches!(
+        &error,
+        Error::ParseString {
+            kind: ParseStringErrorKind::ExpectedLiteral { .. },
+            position: Some(0)
+        }
+    ));
     assert!(error.to_string().contains("expected literal"));
 }
 
@@ -871,6 +979,13 @@ fn parse_string_returns_error_when_literals_do_not_match() {
 fn parse_string_returns_error_for_unmatched_opening_braces() {
     let error = parse_string("Ada", "{name").unwrap_err();
 
+    assert!(matches!(
+        &error,
+        Error::ParseString {
+            kind: ParseStringErrorKind::UnmatchedOpeningBrace,
+            position: Some(0)
+        }
+    ));
     assert!(error.to_string().contains("unmatched opening brace"));
 }
 
@@ -878,6 +993,13 @@ fn parse_string_returns_error_for_unmatched_opening_braces() {
 fn parse_string_returns_error_for_empty_placeholders() {
     let error = parse_string("Ada", "{}").unwrap_err();
 
+    assert!(matches!(
+        &error,
+        Error::ParseString {
+            kind: ParseStringErrorKind::EmptyPlaceholder,
+            position: Some(0)
+        }
+    ));
     assert!(error.to_string().contains("empty field placeholder"));
 }
 
@@ -893,7 +1015,7 @@ fn typed_getters_return_fields() {
     assert_eq!(value.get_str("name", "unknown"), "Ada");
     assert_eq!(value.get_i64("age", 0), 37);
     assert_eq!(value.get_f64("score", 0.0), 99.5);
-    assert_eq!(value.get_bool("active", false), true);
+    assert!(value.get_bool("active", false));
 }
 
 #[test]
@@ -908,7 +1030,7 @@ fn typed_getters_return_defaults_for_missing_null_and_wrong_type_fields() {
     assert_eq!(value.get_str("name", "unknown"), "unknown");
     assert_eq!(value.get_i64("age", 0), 0);
     assert_eq!(value.get_f64("score", 1.5), 1.5);
-    assert_eq!(value.get_bool("active", false), false);
+    assert!(!value.get_bool("active", false));
     assert_eq!(json!(42).get_str("name", "unknown"), "unknown");
 }
 
@@ -922,7 +1044,7 @@ fn typed_getters_support_json_pointer_keys() {
     });
 
     assert_eq!(value.get_str("/metadata/name", "unknown"), "Ada");
-    assert_eq!(value.get_bool("/metadata/active", false), true);
+    assert!(value.get_bool("/metadata/active", false));
     assert_eq!(value.get_str("/metadata/missing", "unknown"), "unknown");
 }
 
