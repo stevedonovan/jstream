@@ -5,19 +5,14 @@ use serde_json::json;
 #[test]
 fn filter_passes_matching_values_through() {
     let input = json!({ "name": "Ada", "age": 37 });
-    let value = input
-        .clone()
-        .filter(|value| value.get_i64("age", 0) == 37)
-        .unwrap();
+    let value = input.clone().filter(|value| value.get_i64("age", 0) == 37);
 
     assert_eq!(value, input);
 }
 
 #[test]
 fn filter_replaces_non_matching_values_with_null() {
-    let value = json!({ "name": "Ada", "age": 17 })
-        .filter(|value| value.get_i64("age", 0) >= 18)
-        .unwrap();
+    let value = json!({ "name": "Ada", "age": 17 }).filter(|value| value.get_i64("age", 0) >= 18);
 
     assert_eq!(value, Value::Null);
 }
@@ -55,6 +50,35 @@ fn filter_works_on_serde_json_result_pipelines() {
     let value = serde_json::from_str::<Value>(r#"{"age":17}"#)
         .filter(|value| value.get_i64("age", 0) >= 18)
         .add("category", "adult")
+        .unwrap();
+
+    assert_eq!(value, Value::Null);
+}
+
+#[test]
+fn try_filter_passes_rejections_and_errors_through_result_pipelines() {
+    let rejected = json!({ "age": 17 })
+        .try_filter(|value| Ok(value.get_i64("age", 0) >= 18))
+        .unwrap();
+    assert_eq!(rejected, Value::Null);
+
+    let error = json!({ "age": "unknown" })
+        .try_filter(|_| {
+            Err(Error::Shape {
+                path: "$.age".to_owned(),
+                expected: JsonKind::Number,
+                actual: Some(JsonKind::String),
+            })
+        })
+        .unwrap_err();
+
+    assert!(matches!(error, Error::Shape { .. }));
+}
+
+#[test]
+fn try_filter_does_not_invoke_its_predicate_for_null() {
+    let value = Value::Null
+        .try_filter(|_| panic!("try_filter predicate should not run for null"))
         .unwrap();
 
     assert_eq!(value, Value::Null);

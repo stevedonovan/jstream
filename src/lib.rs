@@ -501,9 +501,17 @@ pub trait JsonStream {
     ///
     /// JSON `null` is an absorbing pipeline value: subsequent [`JsonStream`]
     /// methods preserve it without invoking their closures.
-    fn filter<F>(self, predicate: F) -> Result<Value>
+    fn filter<F>(self, predicate: F) -> Self
     where
+        Self: Sized,
         F: FnOnce(&Value) -> bool;
+
+    /// Pass the current value through when a fallible `predicate` returns
+    /// `Ok(true)`, replace it with JSON `null` for `Ok(false)`, or propagate
+    /// the predicate error.
+    fn try_filter<F>(self, predicate: F) -> Result<Value>
+    where
+        F: FnOnce(&Value) -> Result<bool>;
 
     /// Keep only the requested fields.
     ///
@@ -613,11 +621,22 @@ pub trait JsonStream {
 }
 
 impl JsonStream for Value {
-    fn filter<F>(self, predicate: F) -> Result<Value>
+    fn filter<F>(self, predicate: F) -> Self
     where
         F: FnOnce(&Value) -> bool,
     {
         if self.is_null() || predicate(&self) {
+            self
+        } else {
+            Value::Null
+        }
+    }
+
+    fn try_filter<F>(self, predicate: F) -> Result<Value>
+    where
+        F: FnOnce(&Value) -> Result<bool>,
+    {
+        if self.is_null() || predicate(&self)? {
             Ok(self)
         } else {
             Ok(Value::Null)
@@ -802,11 +821,18 @@ impl JsonStream for Value {
 }
 
 impl JsonStream for Result<Value> {
-    fn filter<F>(self, predicate: F) -> Result<Value>
+    fn filter<F>(self, predicate: F) -> Self
     where
         F: FnOnce(&Value) -> bool,
     {
-        self.and_then(|value| value.filter(predicate))
+        self.map(|value| value.filter(predicate))
+    }
+
+    fn try_filter<F>(self, predicate: F) -> Result<Value>
+    where
+        F: FnOnce(&Value) -> Result<bool>,
+    {
+        self.and_then(|value| value.try_filter(predicate))
     }
 
     fn select<K, I>(self, keys: I) -> Result<Value>
@@ -913,12 +939,19 @@ impl JsonStream for Result<Value> {
 }
 
 impl JsonStream for serde_json::Result<Value> {
-    fn filter<F>(self, predicate: F) -> Result<Value>
+    fn filter<F>(self, predicate: F) -> Self
     where
         F: FnOnce(&Value) -> bool,
     {
+        self.map(|value| value.filter(predicate))
+    }
+
+    fn try_filter<F>(self, predicate: F) -> Result<Value>
+    where
+        F: FnOnce(&Value) -> Result<bool>,
+    {
         match self {
-            Ok(value) => value.filter(predicate),
+            Ok(value) => value.try_filter(predicate),
             Err(error) => Err(error.into()),
         }
     }

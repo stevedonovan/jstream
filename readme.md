@@ -71,6 +71,7 @@ handled with one final `?`.
 - `select(["a", "b"])`: keep requested top-level fields, inserting `null` for missing fields. The field lookup
    can be a JSON pointer, like '/field/sub', and/or there can be a rename expression like 'old as new'
 - `filter(|value| predicate)`: pass matching records through and turn non-matching records into `null`.
+- `try_filter(|value| fallible_predicate)`: the fallible counterpart to `filter`.
 - `add("field", value)`: add or replace a top-level field with any serializable value.
 - `merge(json!({...}))`: shallow merge object fields without replacing existing fields.
 - `merge_eval(|value| json!({...}))`: calculate fields from the current value, then merge them.
