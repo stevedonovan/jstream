@@ -88,20 +88,6 @@ handled with one final `?`.
 Note that `merge`, `merge_eval`, and `replace_eval` silently skip calculated values that are not
 objects.
 
-JSON `null` is an absorbing pipeline value. Once `filter` rejects a record, later `JsonStream`
-methods preserve it and do not invoke their closures:
-
-```rust
-use jstream::{JsonGet, JsonStream, json};
-
-let value = json!({ "name": "Ada", "age": 17 })
-    .filter(|value| value.get_i64("age", 0) >= 18)
-    .add("category", "adult")?;
-
-assert_eq!(value, json!(null));
-# Ok::<(), jstream::Error>(())
-```
-
 This gives us a way to conditionally add fields:
 
 ```rust
@@ -119,7 +105,20 @@ let value = json!({"num": 1})
 assert_eq!(value, json!({"num": 1, "is_non_zero": true}));
 # Ok::<(), jstream::Error>(())
 ```
+JSON `null` is an absorbing pipeline value. Once `filter` rejects a record, later `JsonStream`
+methods preserve it and do not invoke their closures:
 
+```rust
+use jstream::{JsonGet, JsonStream, json};
+
+let value = json!({ "name": "Ada", "age": 17 })
+    .filter(|value| value.get_i64("age", 0) >= 18)
+    .add("category", "adult")?;
+
+assert_eq!(value, json!(null));
+# Ok::<(), jstream::Error>(())
+```
+  
 Use `replace_eval` when calculated fields should overwrite existing values. This is useful after
 parsing text into string fields and then converting those strings:
 
