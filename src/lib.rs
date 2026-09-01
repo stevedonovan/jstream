@@ -2,6 +2,7 @@
 
 mod access;
 mod error;
+mod pointer;
 mod shape;
 mod stream;
 mod template;

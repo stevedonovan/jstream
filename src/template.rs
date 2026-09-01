@@ -1,6 +1,6 @@
 use serde_json::{Map, Value};
 
-use crate::{Error, ParseStringErrorKind, Result, access::resolve_value};
+use crate::{Error, ParseStringErrorKind, Result, access::resolve_value, pointer::pointer_tokens};
 
 /// Expand `{field}` placeholders from a JSON value into a string.
 ///
@@ -160,11 +160,7 @@ fn insert_pointer_field(
     pointer: &str,
     value: Value,
 ) -> Result<()> {
-    let mut tokens = pointer
-        .split('/')
-        .skip(1)
-        .map(unescape_pointer_token)
-        .peekable();
+    let mut tokens = pointer_tokens(pointer).peekable();
     let Some(mut token) = tokens.next() else {
         return Err(parse_error(ParseStringErrorKind::EmptyPointer, None));
     };
@@ -188,30 +184,6 @@ fn insert_pointer_field(
 
     current.insert(token, value);
     Ok(())
-}
-
-fn unescape_pointer_token(token: &str) -> String {
-    let mut unescaped = String::new();
-    let mut chars = token.chars();
-
-    while let Some(ch) = chars.next() {
-        if ch != '~' {
-            unescaped.push(ch);
-            continue;
-        }
-
-        match chars.next() {
-            Some('0') => unescaped.push('~'),
-            Some('1') => unescaped.push('/'),
-            Some(ch) => {
-                unescaped.push('~');
-                unescaped.push(ch);
-            }
-            None => unescaped.push('~'),
-        }
-    }
-
-    unescaped
 }
 
 fn parse_error(kind: ParseStringErrorKind, position: Option<usize>) -> Error {

@@ -118,7 +118,7 @@ fn select_keeps_requested_fields_and_fills_missing_ones() {
         "ignored": true
     });
 
-    let selected = value.select(["name", "date", "age"]).unwrap();
+    let selected = value.select(["name", "date", "age"]);
 
     assert_eq!(
         selected,
@@ -141,9 +141,7 @@ fn select_can_rename_and_use_pointers() {
         }
     });
 
-    let selected = value
-        .select(["name as first_name", "date", "age", "/context/skill"])
-        .unwrap();
+    let selected = value.select(["name as first_name", "date", "age", "/context/skill"]);
 
     assert_eq!(
         selected,
@@ -158,9 +156,20 @@ fn select_can_rename_and_use_pointers() {
 
 #[test]
 fn select_treats_non_objects_as_empty_objects() {
-    let selected = json!(42).select(["name"]).unwrap();
+    let selected = json!(42).select(["name"]);
 
     assert_eq!(selected, json!({ "name": null }));
+}
+
+#[test]
+fn select_preserves_result_wrapper_types() {
+    let crate_result: Result<Value> = Ok(json!({ "name": "Ada" }));
+    let crate_selected: Result<Value> = crate_result.select(["name"]);
+    assert_eq!(crate_selected.unwrap(), json!({ "name": "Ada" }));
+
+    let serde_result = serde_json::from_str::<Value>(r#"{"name":"Ada"}"#);
+    let serde_selected: serde_json::Result<Value> = serde_result.select(["name"]);
+    assert_eq!(serde_selected.unwrap(), json!({ "name": "Ada" }));
 }
 
 #[test]

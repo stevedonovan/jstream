@@ -80,6 +80,7 @@
 use crate::{
     Result,
     access::resolve_value,
+    pointer::pointer_tokens,
     shape::{require_shape_value, select_shape_value},
     template::{format_field, parse_string},
 };
@@ -140,9 +141,12 @@ pub trait JsonStream {
     /// non-object inputs are treated as empty objects. They may be renamed with
     /// `old as new`.
     /// Fields may be JSON pointers - without a rename, the new key becomes
-    /// the last part of the pointer (so '/path/to/data' becomes 'data')
-    fn select<K, I>(self, keys: I) -> Result<Value>
+    /// the last part of the pointer (so '/path/to/data' becomes 'data'). Like
+    /// [`JsonStream::filter`], this infallible operation preserves the receiver
+    /// type.
+    fn select<K, I>(self, keys: I) -> Self
     where
+        Self: Sized,
         K: AsRef<str>,
         I: IntoIterator<Item = K>;
 
@@ -264,13 +268,13 @@ impl JsonStream for Value {
         }
     }
 
-    fn select<K, I>(self, keys: I) -> Result<Value>
+    fn select<K, I>(self, keys: I) -> Self
     where
         K: AsRef<str>,
         I: IntoIterator<Item = K>,
     {
         if self.is_null() {
-            return Ok(self);
+            return self;
         }
 
         let selected = keys
@@ -279,21 +283,19 @@ impl JsonStream for Value {
                 let key = key.as_ref();
                 let (key, out_key) = if let Some(idx) = key.find(" as ") {
                     (key[0..idx].trim(), key[idx + 4..].trim())
+                } else if key.starts_with('/') {
+                    let idx = key.rfind('/').unwrap();
+                    let last = &key[idx + 1..];
+                    (key, last)
                 } else {
-                    if key.starts_with('/') {
-                        let idx = key.rfind('/').unwrap();
-                        let last = &key[idx + 1..];
-                        (key, last)
-                    } else {
-                        (key, key)
-                    }
+                    (key, key)
                 };
-                let value = resolve_value(&self, key).cloned().unwrap_or(Value::Null);
-                (out_key.to_owned(), value)
+                let field = resolve_value(&self, key).cloned().unwrap_or(Value::Null);
+                (out_key.to_owned(), field)
             })
             .collect();
 
-        Ok(Value::Object(selected))
+        Value::Object(selected)
     }
 
     fn add<K, V>(self, key: K, value: V) -> Result<Value>
@@ -301,82 +303,68 @@ impl JsonStream for Value {
         K: Into<String>,
         V: Serialize,
     {
-        if self.is_null() {
-            return Ok(self);
-        }
+        continue_with(self, |json| {
+            let mut object = match json {
+                Value::Object(object) => object,
+                _ => Map::new(),
+            };
 
-        let mut object = match self {
-            Value::Object(object) => object,
-            _ => Map::new(),
-        };
-
-        object.insert(key.into(), serde_json::to_value(value)?);
-        Ok(Value::Object(object))
+            object.insert(key.into(), serde_json::to_value(value)?);
+            Ok(Value::Object(object))
+        })
     }
 
     fn merge<V>(self, value: V) -> Result<Value>
     where
         V: Serialize,
     {
-        if self.is_null() {
-            return Ok(self);
-        }
-
-        merge_values(self, serde_json::to_value(value)?)
+        continue_with(self, |json| {
+            merge_values(json, serde_json::to_value(value)?)
+        })
     }
 
     fn merge_eval<F>(self, f: F) -> Result<Value>
     where
         F: FnOnce(&Value) -> Value,
     {
-        if self.is_null() {
-            return Ok(self);
-        }
-
-        let fields = f(&self);
-        merge_values(self, fields)
+        continue_with(self, |json| {
+            let fields = f(&json);
+            merge_values(json, fields)
+        })
     }
 
     fn replace_eval<F>(self, f: F) -> Result<Value>
     where
         F: FnOnce(&Value) -> Value,
     {
-        if self.is_null() {
-            return Ok(self);
-        }
-
-        let fields = f(&self);
-        replace_values(self, fields)
+        continue_with(self, |json| {
+            let fields = f(&json);
+            replace_values(json, fields)
+        })
     }
 
     fn parse_text<K>(self, key: K, template: &str) -> Result<Value>
     where
         K: AsRef<str>,
     {
-        if self.is_null() {
-            return Ok(self);
-        }
-
-        let parsed = parse_string(format_field(&self, key.as_ref()).as_str(), template)?;
-        merge_values(self, parsed)
+        continue_with(self, |json| {
+            let parsed = parse_string(format_field(&json, key.as_ref()).as_str(), template)?;
+            merge_values(json, parsed)
+        })
     }
 
     fn transform<F>(self, f: F) -> Result<Value>
     where
         F: FnOnce(Value) -> Value,
     {
-        if self.is_null() {
-            Ok(self)
-        } else {
-            Ok(f(self))
-        }
+        continue_with(self, |value| Ok(f(value)))
     }
 
     fn try_map<F>(self, f: F) -> Result<Value>
     where
         F: FnOnce(Value) -> Result<Value>,
     {
-        if self.is_null() { Ok(self) } else { f(self) }
+        continue_with(self, f)
     }
 
     fn delete<K>(self, key: K) -> Result<Value>
@@ -406,38 +394,32 @@ impl JsonStream for Value {
     where
         T: DeserializeOwned,
     {
-        if self.is_null() {
-            return Ok(self);
-        }
-
-        serde_json::from_value::<T>(self.clone())?;
-        Ok(self)
+        continue_with(self, |value| {
+            serde_json::from_value::<T>(value.clone())?;
+            Ok(value)
+        })
     }
 
     fn require_shape<V>(self, shape: V) -> Result<Value>
     where
         V: Serialize,
     {
-        if self.is_null() {
-            return Ok(self);
-        }
-
-        let shape = serde_json::to_value(shape)?;
-        require_shape_value(&self, &shape)?;
-        Ok(self)
+        continue_with(self, |value| {
+            let shape = serde_json::to_value(shape)?;
+            require_shape_value(&value, &shape)?;
+            Ok(value)
+        })
     }
 
     fn select_shape<V>(self, shape: V) -> Result<Value>
     where
         V: Serialize,
     {
-        if self.is_null() {
-            return Ok(self);
-        }
-
-        let shape = serde_json::to_value(shape)?;
-        require_shape_value(&self, &shape)?;
-        Ok(select_shape_value(&self, &shape))
+        continue_with(self, |value| {
+            let shape = serde_json::to_value(shape)?;
+            require_shape_value(&value, &shape)?;
+            Ok(select_shape_value(&value, &shape))
+        })
     }
 }
 
@@ -456,12 +438,12 @@ impl JsonStream for Result<Value> {
         self.and_then(|value| value.try_filter(predicate))
     }
 
-    fn select<K, I>(self, keys: I) -> Result<Value>
+    fn select<K, I>(self, keys: I) -> Self
     where
         K: AsRef<str>,
         I: IntoIterator<Item = K>,
     {
-        self.and_then(|value| value.select(keys))
+        self.map(|value| value.select(keys))
     }
 
     fn add<K, V>(self, key: K, value: V) -> Result<Value>
@@ -577,15 +559,12 @@ impl JsonStream for serde_json::Result<Value> {
         }
     }
 
-    fn select<K, I>(self, keys: I) -> Result<Value>
+    fn select<K, I>(self, keys: I) -> Self
     where
         K: AsRef<str>,
         I: IntoIterator<Item = K>,
     {
-        match self {
-            Ok(value) => value.select(keys),
-            Err(error) => Err(error.into()),
-        }
+        self.map(|value| value.select(keys))
     }
 
     fn add<K, V>(self, key: K, value: V) -> Result<Value>
@@ -722,6 +701,13 @@ impl JsonStream for serde_json::Result<Value> {
     }
 }
 
+fn continue_with<F>(value: Value, f: F) -> Result<Value>
+where
+    F: FnOnce(Value) -> Result<Value>,
+{
+    if value.is_null() { Ok(value) } else { f(value) }
+}
+
 fn merge_values(base: Value, fields: Value) -> Result<Value> {
     let mut object = match base {
         Value::Object(object) => object,
@@ -811,11 +797,7 @@ fn insert_field(value: &mut Value, key: &str, field: Value) {
 }
 
 fn take_pointer(value: &mut Value, pointer: &str) -> Option<Value> {
-    let mut tokens = pointer
-        .split('/')
-        .skip(1)
-        .map(unescape_pointer_token)
-        .peekable();
+    let mut tokens = pointer_tokens(pointer).peekable();
     let mut token = tokens.next()?;
     let mut current = value;
 
@@ -844,11 +826,7 @@ fn take_pointer(value: &mut Value, pointer: &str) -> Option<Value> {
 }
 
 fn insert_pointer_value(value: &mut Value, pointer: &str, field: Value) {
-    let mut tokens = pointer
-        .split('/')
-        .skip(1)
-        .map(unescape_pointer_token)
-        .peekable();
+    let mut tokens = pointer_tokens(pointer).peekable();
     let Some(mut token) = tokens.next() else {
         *value = field;
         return;
@@ -881,11 +859,7 @@ fn insert_pointer_value(value: &mut Value, pointer: &str, field: Value) {
 }
 
 fn delete_pointer(value: &mut Value, pointer: &str) {
-    let mut tokens = pointer
-        .split('/')
-        .skip(1)
-        .map(unescape_pointer_token)
-        .peekable();
+    let mut tokens = pointer_tokens(pointer).peekable();
     let Some(mut token) = tokens.next() else {
         return;
     };
@@ -928,28 +902,4 @@ fn delete_pointer(value: &mut Value, pointer: &str) {
         }
         _ => {}
     }
-}
-
-fn unescape_pointer_token(token: &str) -> String {
-    let mut unescaped = String::new();
-    let mut chars = token.chars();
-
-    while let Some(ch) = chars.next() {
-        if ch != '~' {
-            unescaped.push(ch);
-            continue;
-        }
-
-        match chars.next() {
-            Some('0') => unescaped.push('~'),
-            Some('1') => unescaped.push('/'),
-            Some(ch) => {
-                unescaped.push('~');
-                unescaped.push(ch);
-            }
-            None => unescaped.push('~'),
-        }
-    }
-
-    unescaped
 }
