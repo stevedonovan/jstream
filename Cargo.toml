@@ -1,6 +1,6 @@
 [package]
 name = "jstream"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 description = "A fluent API for transforming serde_json::Value"
 license = "MIT"
@@ -12,3 +12,7 @@ categories = ["encoding"]
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+[dev-dependencies]
+chrono = "0.4"
+url = "2"

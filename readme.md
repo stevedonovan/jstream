@@ -105,7 +105,7 @@ let value = json!({"num": 1})
 assert_eq!(value, json!({"num": 1, "is_non_zero": true}));
 # Ok::<(), jstream::Error>(())
 ```
-JSON `null` is an absorbing pipeline value. Once `filter` rejects a record, later `JsonStream`
+JSON `null` is an pass-through pipeline value. `filter` rejects a record by replacing it by `null` and later `JsonStream`
 methods preserve it and do not invoke their closures:
 
 ```rust
@@ -235,10 +235,17 @@ assert!(matches!(
     Error::Shape {
         expected: JsonKind::Number,
         actual: Some(JsonKind::String),
-        ..
-    }
+        path,
+    } if path == "$.age"
 ));
 ```
+
+## Examples
+
+The interesting ones process common log format (like `cef.rs` and `nginx.rs`) - note the power of the simple text
+parsing patterns. You are of course free to pull in regular expressions, and any other specialized facility. For example,
+in `cef.rs` the timestamps are parsed and presented in ISO format. `nginx.rs` shows a useful trick when processing log records,
+which is to redact any sensitive information in query parameters.
 
 ## Authorship
 
